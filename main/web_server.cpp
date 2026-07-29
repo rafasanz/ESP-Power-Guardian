@@ -99,6 +99,23 @@ static esp_err_t status_handler(httpd_req_t *request) {
     return httpd_resp_sendstr(request, json);
 }
 
+static esp_err_t outage_history_handler(httpd_req_t *request) {
+    GuardianOutage outages[10] = {};
+    size_t count = guardian_outage_history(outages, 10);
+    std::string json = "[";
+    for (size_t reverse = count; reverse > 0; --reverse) {
+        const GuardianOutage &outage = outages[reverse - 1];
+        if (reverse != count) json += ",";
+        json += "{\"started_s\":" + std::to_string(outage.started_ms / 1000) +
+                ",\"ended_s\":" + std::to_string(outage.ended_ms / 1000) +
+                ",\"active\":" + (outage.ended_ms == 0 ? "true" : "false") +
+                ",\"condition\":\"" + guardian_condition_name(outage.condition) + "\"}";
+    }
+    json += "]";
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_send(request, json.data(), json.size());
+}
+
 static esp_err_t led_get_handler(httpd_req_t *request) {
     LedPalette p = settings_led_palette();
     std::string json = "{\"starting\":\"" + hex_color(p.starting) + "\",\"online\":\"" +
@@ -209,6 +226,7 @@ void web_server_start() {
     const httpd_uri_t routes[] = {
         {.uri="/", .method=HTTP_GET, .handler=index_handler},
         {.uri="/api/status", .method=HTTP_GET, .handler=status_handler},
+        {.uri="/api/outages", .method=HTTP_GET, .handler=outage_history_handler},
         {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler},
         {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler},
         {.uri="/api/wifi", .method=HTTP_POST, .handler=wifi_post_handler},

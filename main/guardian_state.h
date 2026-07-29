@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 enum class PowerCondition {
@@ -27,9 +28,15 @@ struct GuardianSnapshot {
     int64_t last_update_ms;
 };
 
+struct GuardianOutage {
+    int64_t started_ms;
+    int64_t ended_ms;
+    PowerCondition condition;
+};
+
 void guardian_state_init();
 GuardianSnapshot guardian_state_get();
 void guardian_state_update(const GuardianSnapshot &snapshot);
+size_t guardian_outage_history(GuardianOutage *outages, size_t capacity);
 const char *guardian_nut_status(PowerCondition condition);
 const char *guardian_condition_name(PowerCondition condition);
-

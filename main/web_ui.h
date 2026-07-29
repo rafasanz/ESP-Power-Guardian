@@ -13,9 +13,10 @@ button,select,input{font:inherit}.tab,.button,.choice{border:0;border-radius:var
 .cards{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:var(--content-gap)}.cards.four{grid-template-columns:repeat(4,minmax(150px,1fr))}
 .card{background:var(--card);border-radius:var(--card-radius);padding:var(--card-padding);min-height:62px}.label{font-weight:800}.value{margin-top:4px;color:var(--accent2);overflow-wrap:anywhere}
 .flow{display:grid;grid-template-columns:1fr 90px 1.35fr 90px 1fr;align-items:center;min-height:300px}.node{border:2px solid var(--accent);border-radius:var(--card-radius);padding:18px;text-align:center;min-height:125px;display:grid;place-content:center}
-.node.ups{min-height:270px}.duo{font-size:2.6rem;filter:drop-shadow(7px 7px 0 color-mix(in srgb,var(--accent2) 40%,transparent))}.wire{height:6px;background:var(--line);position:relative}.wire:after{content:"";position:absolute;height:100%;width:32%;background:#fff;animation:energy 1.5s linear infinite}@keyframes energy{from{left:-32%}to{left:100%}}
+.node.ups{min-height:270px}.duo{font-size:2.6rem}.wire{height:8px;background:var(--line);position:relative;overflow:hidden}.wire:after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 8px,#fff 8px 20px,transparent 20px 30px);animation:energy 1.1s linear infinite}@keyframes energy{to{background-position:30px 0}}
+.wire.input.stopped{background:#4b1118}.wire.input.stopped:after{background:repeating-linear-gradient(90deg,transparent 0 8px,#ff3b48 8px 20px,transparent 20px 30px);animation:none}
 .meters{display:grid;gap:18px;margin-top:14px;text-align:left}.meter{display:grid;grid-template-columns:76px 1fr;align-items:center;gap:12px}.ring{width:70px;height:70px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--accent) var(--pct),var(--line) 0);position:relative;font-weight:900}.ring:before{content:"";position:absolute;inset:9px;border-radius:50%;background:var(--panel)}.ring span{position:relative}
-.summary-row{display:grid;grid-template-columns:1fr 1fr;gap:var(--content-gap)}.history{margin:0;padding-left:20px}.history li{margin:8px 0}
+.summary-row{display:grid;grid-template-columns:1fr 1fr;gap:var(--content-gap);margin-bottom:var(--panel-gap)}.history{margin:0;padding-left:20px}.history li{margin:8px 0}.history time{color:var(--accent2)}.history-empty{margin:0}
 .controls{display:grid;grid-template-columns:repeat(2,minmax(250px,1fr));gap:var(--content-gap)}.appearance-item{padding:var(--panel-padding);display:flex;flex-direction:column;gap:10px}.appearance-title{padding-left:10px;border-left:3px solid var(--text);min-height:35px;display:flex;align-items:center}
 .segmented{display:grid;grid-template-columns:1fr 1fr;gap:8px}.swatches{display:flex;gap:9px;flex-wrap:wrap}.swatch{width:58px;height:48px;border:0;border-radius:var(--control-radius);cursor:pointer}.swatch.active{outline:3px solid #fff;outline-offset:2px}
 select,input[type=text],input[type=password],input[type=file]{width:100%;padding:11px;border:1px solid var(--line);border-radius:var(--control-radius);background:var(--card);color:var(--text)}
@@ -32,14 +33,14 @@ body.light[data-theme=mono]{--accent:#000;--accent2:#000}body[data-theme=gray]{-
 
 <section id="summary" class="page active">
 <div class="panel"><h3>Flujo de energía</h3><div class="flow">
-<div class="node"><div class="duo">⚡</div><strong>Red eléctrica</strong><span id="sumInput">— V</span></div><div class="wire"></div>
+<div class="node"><div class="duo">⚡</div><strong>Red eléctrica</strong><span id="sumInput">— V</span></div><div id="inputWire" class="wire input"></div>
 <div class="node ups"><div class="duo">🛡️</div><h2>SAI</h2><div class="meters">
 <div class="meter"><div class="ring" id="loadRing" style="--pct:0%"><span id="loadPct">0%</span></div><div><b id="sumLoad">Carga: 0 %</b><br><small id="sumPower">Potencia estimada: 0 W</small></div></div>
 <div class="meter"><div class="ring" id="batteryRing" style="--pct:0%"><span id="batteryPct">0%</span></div><div><b id="sumBattery">Batería: 0 %</b><br><small id="sumRuntime">Tiempo estimado: — min</small></div></div>
 </div></div><div class="wire"></div><div class="node"><div class="duo">🔌</div><strong>Salida protegida</strong><span id="sumOutput">— V</span></div></div></div>
 <div class="summary-row"><div class="card"><div class="label">⚡ Alimentación</div><div id="sumCondition" class="value">Consultando el dispositivo…</div></div>
 <div class="card"><div class="label">🕘 Últimos datos recibidos</div><div id="sumLastData" class="value">Esperando datos…</div></div></div>
-<div class="panel"><h3>Historial de cortes</h3><p class="notice">No hay cortes registrados durante este arranque.</p></div>
+<div class="panel"><h3>Historial de cortes</h3><div id="outageHistory"><p class="notice history-empty">No hay cortes registrados durante este arranque.</p></div></div>
 </section>
 
 <section id="technical" class="page">
@@ -82,7 +83,8 @@ function api(url,options={}){return new Promise((resolve,reject)=>{const xhr=new
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.page).classList.add('active')});
 const fmt=s=>{s=Math.max(0,s||0);let h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h} h ${m} min`:`${m} min ${s%60} s`};
 function text(id,v){$(id).textContent=v}
-async function refresh(){try{let s=await api('/api/status').then(r=>r.json());window.guardian=s;
+let lastSuccessfulStatus=0;
+async function refresh(){try{let s=await api('/api/status').then(r=>r.json());window.guardian=s;lastSuccessfulStatus=Date.now();
 text('footerVersion','Versión: '+s.firmware);text('sumCondition',s.condition);text('sumInput',s.data_valid?s.input_voltage.toFixed(1)+' V':'— V');text('sumOutput',s.data_valid?s.output_voltage.toFixed(1)+' V':'— V');
 text('sumLoad',`Carga: ${s.load} %`);text('sumPower',`Potencia estimada: ${Math.round(700*s.load/100)} W`);text('loadPct',s.load+'%');$('loadRing').style.setProperty('--pct',s.load+'%');
 text('sumBattery',`Batería: ${s.battery} %`);text('batteryPct',s.battery+'%');$('batteryRing').style.setProperty('--pct',s.battery+'%');text('sumRuntime',`Tiempo estimado: ${Math.round(s.runtime_s/60)} min`);
@@ -92,7 +94,9 @@ text('tUps',s.usb_vid==='0000'?'sin detectar':'conectado');text('tUsb',s.usb_vid
 text('tCondition',s.condition);text('tInput',s.data_valid?s.input_voltage.toFixed(1)+' V':'—');text('tOutput',s.data_valid?s.output_voltage.toFixed(1)+' V':'—');text('tLoad',s.data_valid?s.load+' %':'—');text('tFrequency',s.data_valid?s.frequency.toFixed(1)+' Hz':'—');
 text('tBatteryState',s.battery<20?'baja':s.data_valid?'normal':'sin datos');text('tBatteryVoltage',s.data_valid?s.battery_voltage.toFixed(1)+' V':'—');text('tBattery',s.data_valid?s.battery+' %':'—');text('tRuntime',s.data_valid?Math.round(s.runtime_s/60)+' min':'—');
 text('tLastData',s.last_data_age_s>=0?`hace ${s.last_data_age_s} s`:'sin datos');text('tNutStatus',s.ups_status);text('tQxDiag',s.qx_status);
-}catch(e){text('sumCondition','No se pudo consultar el dispositivo');text('tQxDiag',e.message)}}
+$('inputWire').classList.toggle('stopped',s.ups_status.includes('OB')||s.condition==='SAI desconectado');await refreshOutages(s.uptime_s);
+}catch(e){let age=lastSuccessfulStatus?Math.round((Date.now()-lastSuccessfulStatus)/1000):null;text('sumLastData',age===null?'Esperando la primera respuesta…':`Último dato válido hace ${age} s · reconectando…`);text('tQxDiag','Consulta web interrumpida; se conserva el último estado válido')}}
+async function refreshOutages(uptime){try{let outages=await api('/api/outages').then(r=>r.json());if(!outages.length){$('outageHistory').innerHTML='<p class="notice history-empty">No hay cortes registrados durante este arranque.</p>';return}let now=Date.now();$('outageHistory').innerHTML='<ol class="history">'+outages.map(o=>{let started=new Date(now-(uptime-o.started_s)*1000);let duration=(o.active?uptime:o.ended_s)-o.started_s;let end=o.active?'En curso':`Restablecido · duración ${fmt(duration)}`;return `<li><time>${started.toLocaleString('es-ES')}</time> · ${o.condition}<br><span class="notice">${end}</span></li>`}).join('')+'</ol>'}catch(e){}}
 async function loadLed(){let p=await api('/api/led').then(r=>r.json());ledIds.forEach(k=>$(k).value=p[k]);$('brightness').value=p.brightness;text('brightnessV',p.brightness)}
 async function saveLed(){let p={brightness:+$('brightness').value};ledIds.forEach(k=>p[k]=$(k).value);alert(await api('/api/led',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)}).then(r=>r.text()));await loadLed()}
 async function saveWifi(){let body=new URLSearchParams({ssid:$('ssid').value,password:$('password').value});alert(await api('/api/wifi',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()}).then(r=>r.text()))}
