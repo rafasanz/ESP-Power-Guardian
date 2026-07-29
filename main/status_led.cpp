@@ -72,7 +72,8 @@ static esp_err_t make_encoder(rmt_encoder_handle_t *out) {
         .flags = {.msb_first = 1},
     };
     ESP_ERROR_CHECK(rmt_new_bytes_encoder(&bytes_cfg, &led->bytes));
-    ESP_ERROR_CHECK(rmt_new_copy_encoder({}, &led->copy));
+    rmt_copy_encoder_config_t copy_config = {};
+    ESP_ERROR_CHECK(rmt_new_copy_encoder(&copy_config, &led->copy));
     *out = &led->base;
     return ESP_OK;
 }
@@ -126,4 +127,3 @@ void status_led_start() {
     xTaskCreate(led_task, "status_led", 3072, nullptr, 4, nullptr);
     ESP_LOGI(TAG, "WS2818 iniciado en GPIO48");
 }
-

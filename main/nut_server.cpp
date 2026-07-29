@@ -68,6 +68,20 @@ static void process(int socket, std::string line) {
         send_line(socket, "END LIST UPS");
         return;
     }
+    if (line == std::string("GET UPSDESC ") + UPS_NAME) {
+        send_line(socket, std::string("UPSDESC ") + UPS_NAME + " \"ESP Power Guardian\"");
+        return;
+    }
+    if (line == std::string("LIST RW ") + UPS_NAME) {
+        send_line(socket, std::string("BEGIN LIST RW ") + UPS_NAME);
+        send_line(socket, std::string("END LIST RW ") + UPS_NAME);
+        return;
+    }
+    if (line == std::string("LIST CMD ") + UPS_NAME) {
+        send_line(socket, std::string("BEGIN LIST CMD ") + UPS_NAME);
+        send_line(socket, std::string("END LIST CMD ") + UPS_NAME);
+        return;
+    }
     if (line == std::string("LIST VAR ") + UPS_NAME) {
         send_line(socket, std::string("BEGIN LIST VAR ") + UPS_NAME);
         for (const auto &var : variables()) {
@@ -90,6 +104,11 @@ static void process(int socket, std::string line) {
     }
     if (line.rfind("USERNAME ", 0) == 0 || line.rfind("PASSWORD ", 0) == 0) {
         send_line(socket, "OK");
+        return;
+    }
+    if (line == "LOGOUT") {
+        send_line(socket, "OK Goodbye");
+        shutdown(socket, SHUT_RDWR);
         return;
     }
     send_line(socket, "ERR UNKNOWN-COMMAND");
@@ -137,4 +156,3 @@ static void server_task(void *) {
 void nut_server_start() {
     xTaskCreate(server_task, "nut_server", 6144, nullptr, 4, nullptr);
 }
-

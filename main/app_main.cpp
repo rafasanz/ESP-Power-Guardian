@@ -1,4 +1,5 @@
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 
 #include "guardian_state.h"
 #include "nut_server.h"
@@ -9,6 +10,7 @@
 #include "wifi_manager.h"
 
 extern "C" void app_main() {
+    esp_ota_mark_app_valid_cancel_rollback();
     settings_init();
     guardian_state_init();
     status_led_start();

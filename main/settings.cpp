@@ -38,11 +38,25 @@ bool settings_set_led_palette(const LedPalette &value) {
 
 bool settings_wifi_credentials(char *ssid, size_t ssid_size, char *password, size_t password_size) {
     nvs_handle_t nvs;
-    if (nvs_open("guardian", NVS_READONLY, &nvs) != ESP_OK) return false;
-    esp_err_t ssid_result = nvs_get_str(nvs, "wifi_ssid", ssid, &ssid_size);
-    esp_err_t pass_result = nvs_get_str(nvs, "wifi_pass", password, &password_size);
+    if (nvs_open("guardian", NVS_READONLY, &nvs) == ESP_OK) {
+        size_t current_ssid_size = ssid_size;
+        size_t current_password_size = password_size;
+        esp_err_t ssid_result = nvs_get_str(nvs, "wifi_ssid", ssid, &current_ssid_size);
+        esp_err_t pass_result = nvs_get_str(nvs, "wifi_pass", password, &current_password_size);
+        nvs_close(nvs);
+        if (ssid_result == ESP_OK && pass_result == ESP_OK && ssid[0] != '\0') return true;
+    }
+
+    // Importación única desde el formato NVS usado por las versiones de desarrollo.
+    if (nvs_open("wifi", NVS_READONLY, &nvs) != ESP_OK) return false;
+    size_t legacy_ssid_size = ssid_size;
+    size_t legacy_password_size = password_size;
+    esp_err_t ssid_result = nvs_get_str(nvs, "ssid", ssid, &legacy_ssid_size);
+    esp_err_t pass_result = nvs_get_str(nvs, "password", password, &legacy_password_size);
     nvs_close(nvs);
-    return ssid_result == ESP_OK && pass_result == ESP_OK && ssid[0] != '\0';
+    if (ssid_result != ESP_OK || pass_result != ESP_OK || ssid[0] == '\0') return false;
+    settings_set_wifi_credentials(ssid, password);
+    return true;
 }
 
 bool settings_set_wifi_credentials(const char *ssid, const char *password) {
