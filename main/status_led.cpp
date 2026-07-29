@@ -91,11 +91,12 @@ static uint32_t color_for(PowerCondition condition, const LedPalette &p) {
 }
 
 static void led_task(void *) {
-    uint32_t previous = UINT32_MAX;
+    uint64_t previous_signature = UINT64_MAX;
     while (true) {
         LedPalette p = settings_led_palette();
         uint32_t rgb = color_for(guardian_state_get().condition, p);
-        if (rgb != previous) {
+        uint64_t signature = (static_cast<uint64_t>(rgb) << 8) | p.brightness;
+        if (signature != previous_signature) {
             uint8_t scale = p.brightness;
             uint8_t grb[3] = {
                 static_cast<uint8_t>((((rgb >> 8) & 0xff) * scale) / 255),
@@ -105,7 +106,7 @@ static void led_task(void *) {
             rmt_transmit_config_t cfg = {.loop_count = 0};
             rmt_transmit(channel, encoder, grb, sizeof(grb), &cfg);
             rmt_tx_wait_all_done(channel, pdMS_TO_TICKS(100));
-            previous = rgb;
+            previous_signature = signature;
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }

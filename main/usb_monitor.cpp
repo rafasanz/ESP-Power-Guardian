@@ -12,10 +12,13 @@
 #include "guardian_state.h"
 
 static const char *TAG = "usb_qx";
+static char qx_status[96] = "esperando dispositivo USB";
+static char last_qx_reply[128] = "";
 static constexpr uint16_t SUPPORTED_VID = 0x0665;
 static constexpr uint16_t SUPPORTED_PID = 0x5161;
 static constexpr uint8_t QX_INTERFACE = 0;
 static constexpr uint8_t QX_INPUT_ENDPOINT = 0x81;
+static constexpr const char *QX_PROBES[] = {"Q1\r", "QGS\r", "QS\r", "F\r", "I\r"};
 
 struct UsbClient {
     usb_host_client_handle_t client;
@@ -34,6 +37,7 @@ struct UsbClient {
     char reply[128];
     size_t reply_size;
     int64_t next_query_ms;
+    size_t probe_index;
 };
 
 static void client_event(const usb_host_client_event_msg_t *message, void *argument) {
@@ -73,6 +77,7 @@ static void update_disconnected() {
     snapshot.usb_vid = 0;
     snapshot.usb_pid = 0;
     guardian_state_update(snapshot);
+    strlcpy(qx_status, "esperando dispositivo USB", sizeof(qx_status));
 }
 
 static int estimate_battery(float voltage) {
@@ -90,13 +95,16 @@ static int estimate_runtime(int battery_percent, int load_percent) {
 }
 
 static void parse_qx_reply(const char *reply) {
-    float input = 0, input_fault = 0, output = 0, frequency = 0, battery = 0, temperature = 0;
+    strlcpy(last_qx_reply, reply, sizeof(last_qx_reply));
+    float input = 0, input_fault = 0, output = 0, frequency = 0, battery = 0;
     int load = 0;
+    char temperature[8] = {};
     char flags[9] = {};
-    int fields = sscanf(reply, "(%f %f %f %d %f %f %f %8s",
+    int fields = sscanf(reply, "(%f %f %f %d %f %f %7s %8s",
                         &input, &input_fault, &output, &load, &frequency,
-                        &battery, &temperature, flags);
+                        &battery, temperature, flags);
     if (fields < 8) {
+        strlcpy(qx_status, "respuesta Qx no reconocida", sizeof(qx_status));
         ESP_LOGW(TAG, "Respuesta Qx no reconocida: %s", reply);
         return;
     }
@@ -121,13 +129,18 @@ static void parse_qx_reply(const char *reply) {
         snapshot.condition = PowerCondition::Online;
     }
     guardian_state_update(snapshot);
+    strlcpy(qx_status, "comunicación Qx activa", sizeof(qx_status));
 }
 
 static bool allocate_transfers(UsbClient &context) {
-    if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + 8, 0, &context.control) != ESP_OK) return false;
+    if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + 8, 0, &context.control) != ESP_OK) {
+        strlcpy(qx_status, "no se pudo reservar transferencia de control", sizeof(qx_status));
+        return false;
+    }
     if (usb_host_transfer_alloc(8, 0, &context.input) != ESP_OK) {
         usb_host_transfer_free(context.control);
         context.control = nullptr;
+        strlcpy(qx_status, "no se pudo reservar transferencia de entrada", sizeof(qx_status));
         return false;
     }
     context.control->device_handle = context.device;
@@ -152,7 +165,8 @@ static bool send_query(UsbClient &context) {
     setup->wLength = 8;
     uint8_t *payload = context.control->data_buffer + sizeof(usb_setup_packet_t);
     memset(payload, 0, 8);
-    memcpy(payload, "Q1\r", 3);
+    const char *command = QX_PROBES[context.probe_index];
+    memcpy(payload, command, strlen(command));
     context.control->num_bytes = sizeof(usb_setup_packet_t) + 8;
     context.control_finished = false;
     context.reply_size = 0;
@@ -164,6 +178,14 @@ static bool submit_input(UsbClient &context) {
     context.input_finished = false;
     context.input->num_bytes = 8;
     return usb_host_transfer_submit(context.input) == ESP_OK;
+}
+
+static bool begin_query(UsbClient &context) {
+    context.reply_size = 0;
+    memset(context.reply, 0, sizeof(context.reply));
+    if (!submit_input(context)) return false;
+    if (!send_query(context)) return false;
+    return true;
 }
 
 static void release_device(UsbClient &context) {
@@ -219,9 +241,12 @@ static void client_task(void *) {
                     if (descriptor->idVendor == SUPPORTED_VID && descriptor->idProduct == SUPPORTED_PID &&
                         usb_host_interface_claim(context.client, context.device, QX_INTERFACE, 0) == ESP_OK) {
                         context.interface_claimed = true;
+                        strlcpy(qx_status, "interfaz HID reclamada; iniciando Qx", sizeof(qx_status));
                         if (allocate_transfers(context)) {
                             context.next_query_ms = now_ms + 250;
                         }
+                    } else {
+                        strlcpy(qx_status, "dispositivo no compatible o interfaz HID ocupada", sizeof(qx_status));
                     }
                 }
             }
@@ -229,9 +254,8 @@ static void client_task(void *) {
 
         if (context.control_finished) {
             context.control_finished = false;
-            if (context.control_status == USB_TRANSFER_STATUS_COMPLETED) {
-                submit_input(context);
-            } else {
+            if (context.control_status != USB_TRANSFER_STATUS_COMPLETED) {
+                snprintf(qx_status, sizeof(qx_status), "fallo SET_REPORT: %d", context.control_status);
                 context.next_query_ms = now_ms + 1000;
             }
         }
@@ -239,6 +263,13 @@ static void client_task(void *) {
         if (context.input_finished) {
             context.input_finished = false;
             if (context.input_status == USB_TRANSFER_STATUS_COMPLETED && context.input_size > 0) {
+                char packet_debug[96] = {};
+                size_t debug_offset = snprintf(packet_debug, sizeof(packet_debug), "len=%d hex=", context.input_size);
+                for (int i = 0; i < context.input_size && debug_offset + 4 < sizeof(packet_debug); ++i) {
+                    debug_offset += snprintf(packet_debug + debug_offset, sizeof(packet_debug) - debug_offset,
+                                             "%02X", context.input->data_buffer[i]);
+                }
+                strlcpy(last_qx_reply, packet_debug, sizeof(last_qx_reply));
                 size_t available = sizeof(context.reply) - context.reply_size - 1;
                 size_t copy = static_cast<size_t>(context.input_size) < available ?
                               static_cast<size_t>(context.input_size) : available;
@@ -246,12 +277,23 @@ static void client_task(void *) {
                 context.reply_size += copy;
                 context.reply[context.reply_size] = '\0';
                 if (strchr(context.reply, '\r')) {
-                    parse_qx_reply(context.reply);
-                    context.next_query_ms = now_ms + 1000;
+                    if (context.reply[0] == '(') {
+                        parse_qx_reply(context.reply);
+                        context.probe_index = 0;
+                        context.next_query_ms = now_ms + 1000;
+                    } else {
+                        // Un eco indica que este dialecto no está implementado.
+                        context.reply_size = 0;
+                        memset(context.reply, 0, sizeof(context.reply));
+                        context.probe_index =
+                            (context.probe_index + 1) % (sizeof(QX_PROBES) / sizeof(QX_PROBES[0]));
+                        context.next_query_ms = now_ms + 200;
+                    }
                 } else if (!submit_input(context)) {
                     context.next_query_ms = now_ms + 1000;
                 }
             } else {
+                snprintf(qx_status, sizeof(qx_status), "fallo lectura 0x81: %d", context.input_status);
                 context.next_query_ms = now_ms + 1000;
             }
         }
@@ -259,7 +301,7 @@ static void client_task(void *) {
         if (context.interface_claimed && !context.control_finished && !context.input_finished &&
             context.next_query_ms > 0 && now_ms >= context.next_query_ms) {
             context.next_query_ms = 0;
-            if (!send_query(context)) context.next_query_ms = now_ms + 1000;
+            if (!begin_query(context)) context.next_query_ms = now_ms + 1000;
         }
 
         if (context.close_requested) {
@@ -268,6 +310,14 @@ static void client_task(void *) {
             ESP_LOGW(TAG, "Dispositivo USB desconectado");
         }
     }
+}
+
+const char *usb_monitor_status() {
+    return qx_status;
+}
+
+const char *usb_monitor_reply() {
+    return last_qx_reply;
 }
 
 void usb_monitor_start() {
@@ -280,4 +330,3 @@ void usb_monitor_start() {
     xTaskCreate(daemon_task, "usb_daemon", 4096, nullptr, 5, nullptr);
     xTaskCreate(client_task, "usb_qx", 6144, nullptr, 4, nullptr);
 }
-

@@ -7,10 +7,14 @@
 #include "esp_http_server.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
 
 #include "guardian_state.h"
 #include "settings.h"
+#include "usb_monitor.h"
 #include "wifi_manager.h"
+#include "web_ui.h"
 
 static const char PAGE[] = R"HTML(<!doctype html><html lang="es"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -68,18 +72,29 @@ static std::string hex_color(uint32_t color) {
 
 static esp_err_t index_handler(httpd_req_t *request) {
     httpd_resp_set_type(request, "text/html; charset=utf-8");
-    return httpd_resp_send(request, PAGE, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(request, WEB_PAGE, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t status_handler(httpd_req_t *request) {
     GuardianSnapshot s = guardian_state_get();
-    char json[320];
+    wifi_ap_record_t access_point = {};
+    int rssi = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK ? access_point.rssi : 0;
+    int64_t uptime = esp_timer_get_time() / 1000000;
+    int64_t age = s.last_update_ms > 0 ? (esp_timer_get_time() / 1000 - s.last_update_ms) / 1000 : -1;
+    char json[960];
     snprintf(json, sizeof(json),
              "{\"firmware\":\"%s\",\"condition\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
-             "\"nut_port\":3493,\"ups_status\":\"%s\",\"battery\":%d,\"load\":%d}",
+             "\"rssi\":%d,\"uptime_s\":%lld,\"nut_port\":3493,\"ups_status\":\"%s\","
+             "\"usb_vid\":\"%04x\",\"usb_pid\":\"%04x\",\"qx_status\":\"%s\",\"qx_reply\":\"%s\","
+             "\"data_valid\":%s,\"last_data_age_s\":%lld,\"input_voltage\":%.1f,"
+             "\"output_voltage\":%.1f,\"frequency\":%.1f,\"battery_voltage\":%.1f,"
+             "\"battery\":%d,\"runtime_s\":%d,\"load\":%d}",
              EPG_VERSION, guardian_condition_name(s.condition),
              wifi_manager_connected() ? "conectado" : "sin conexión", wifi_manager_ip(),
-             guardian_nut_status(s.condition), s.battery_percent, s.load_percent);
+             rssi, static_cast<long long>(uptime), guardian_nut_status(s.condition),
+             s.usb_vid, s.usb_pid, usb_monitor_status(), usb_monitor_reply(), s.data_valid ? "true" : "false",
+             static_cast<long long>(age), s.input_voltage, s.output_voltage, s.frequency,
+             s.battery_voltage, s.battery_percent, s.runtime_seconds, s.load_percent);
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, json);
 }
@@ -141,6 +156,29 @@ static esp_err_t wifi_post_handler(httpd_req_t *request) {
     return ESP_OK;
 }
 
+static esp_err_t wifi_scan_handler(httpd_req_t *request) {
+    wifi_scan_config_t scan = {};
+    if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, "[]");
+    }
+    uint16_t count = 12;
+    wifi_ap_record_t records[12] = {};
+    esp_wifi_scan_get_ap_records(&count, records);
+    std::string json = "[";
+    for (uint16_t i = 0; i < count; ++i) {
+        if (i) json += ",";
+        std::string ssid(reinterpret_cast<const char *>(records[i].ssid));
+        for (char &character : ssid) {
+            if (character == '"' || character == '\\') character = '_';
+        }
+        json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + std::to_string(records[i].rssi) + "}";
+    }
+    json += "]";
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_send(request, json.data(), json.size());
+}
+
 static esp_err_t ota_handler(httpd_req_t *request) {
     const esp_partition_t *partition = esp_ota_get_next_update_partition(nullptr);
     esp_ota_handle_t handle;
@@ -174,8 +212,8 @@ void web_server_start() {
         {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler},
         {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler},
         {.uri="/api/wifi", .method=HTTP_POST, .handler=wifi_post_handler},
+        {.uri="/api/wifi/scan", .method=HTTP_GET, .handler=wifi_scan_handler},
         {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler},
     };
     for (const auto &route : routes) ESP_ERROR_CHECK(httpd_register_uri_handler(server, &route));
 }
-
