@@ -1,0 +1,16 @@
+.pio/
+.pio-core/
+.vscode/
+build/
+sdkconfig*
+!sdkconfig.defaults
+managed_components/
+dependencies.lock
+codex.md
+CODEX.md
+CLAUDE.md
+AGENTS.md
+.codex/
+.ai/
+*.ai.md
+
