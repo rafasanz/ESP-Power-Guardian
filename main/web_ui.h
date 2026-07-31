@@ -4,7 +4,7 @@ static const char WEB_PAGE[] = R"HTML(<!doctype html><html lang="es"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ESP Power Guardian</title><style>
 :root{color-scheme:dark;--bg:#07111d;--panel:#121e2c;--card:#091523;--line:#2c4056;--text:#f4f8fc;--muted:#a9bfd4;--accent:#20a8c8;--accent2:#7dd8ff;--control-bg:#283c53;--control-text:#f4f8fc;--active-bg:#f4f8fc;--active-text:#07111d;--panel-radius:5px;--card-radius:5px;--control-radius:5px;--panel-gap:10px;--panel-padding:10px;--content-gap:10px;--card-padding:10px;--scale:.78;--font:Nunito,system-ui,sans-serif}
-*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:calc(16px * var(--scale))}
+*{box-sizing:border-box}html{overflow-y:auto;scrollbar-gutter:stable}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font);font-size:calc(16px * var(--scale))}@supports not (scrollbar-gutter:stable){html{overflow-y:scroll}}
 body{overflow-y:auto}main{max-width:1200px;min-height:100svh;margin:auto;padding:0 14px 14px;display:flex;flex-direction:column}.topbar{position:sticky;top:0;z-index:20;padding-top:14px;background:var(--bg);border-bottom:1px solid transparent}.header{display:flex;align-items:center;justify-content:space-between;gap:12px}
 h1{font-size:1.8rem;margin:0 0 12px}h2{font-size:1.35rem;margin:0 0 18px}h3{margin:0;font-size:1rem}.tabs{display:flex;gap:8px;margin-bottom:var(--panel-gap)}
 button,select,input{font:inherit}.tab,.button,.choice{border:1px solid transparent;border-radius:var(--control-radius);background:var(--control-bg);color:var(--control-text);padding:12px 18px;font-weight:800;cursor:pointer}
