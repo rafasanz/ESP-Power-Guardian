@@ -11,7 +11,8 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
 ## Funciones actuales
 
 - USB Host en ESP32-S3 y controlador Qx/Cypress para `0665:5161`.
-- Sondeo `Q1` cada segundo con una única transacción pendiente.
+- Sondeo de estado `Q1` con una única transacción pendiente y cebado Cypress
+  compatible mediante `QGS`, `QS`, `F` e `I` cuando el puente devuelve un eco.
 - Caducidad de datos: un estado antiguo nunca se conserva como `OL` válido.
 - Watchdog de consulta, recuperación del endpoint `0x81` y reinicio controlado
   del bus ante bloqueos persistentes.
@@ -70,7 +71,9 @@ Los Salicru SPS ONE que utilizan el puente Cypress `0665:5161` pueden bloquear
 ocasionalmente el endpoint de entrada al entregar una trama mayor que los ocho
 bytes declarados. El firmware trata explícitamente esta situación:
 
-1. Consulta únicamente el estado `Q1`, cada segundo y sin solapar peticiones.
+1. Consulta el estado `Q1` sin solapar peticiones. Si el informe de entrada es
+   el eco del comando saliente, cierra esa lectura y rota consultas de cebado
+   hasta que el puente entrega la trama Q1 pendiente.
 2. Exige que la respuesta completa llegue dentro de 2,5 segundos.
 3. Considera obsoletos los datos que superan cuatro segundos sin renovación.
 4. Detiene, vacía y reactiva el endpoint `0x81` tras un fallo.
@@ -78,6 +81,10 @@ bytes declarados. El firmware trata explícitamente esta situación:
    reinicia de forma controlada el ESP32 y, con ello, el controlador USB.
 6. Limita a tres los reinicios consecutivos sin una lectura válida para evitar
    bucles de arranque. Una respuesta correcta devuelve el contador a cero.
+
+La secuencia de escritura y lectura sigue el orden del subcontrolador Cypress
+de NUT: primero `SET_REPORT` y, tras completarse, lectura del endpoint `0x81`.
+Esto evita interpretar un informe saliente como una respuesta del SAI.
 
 El LED solo utiliza el color de alimentación de red cuando existe una lectura
 reciente. Durante una recuperación usa el estado de inicio y, si la

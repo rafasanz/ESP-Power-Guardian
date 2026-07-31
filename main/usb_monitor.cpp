@@ -19,7 +19,7 @@ static constexpr uint16_t SUPPORTED_VID = 0x0665;
 static constexpr uint16_t SUPPORTED_PID = 0x5161;
 static constexpr uint8_t QX_INTERFACE = 0;
 static constexpr uint8_t QX_INPUT_ENDPOINT = 0x81;
-static constexpr const char *STATUS_QUERY = "Q1\r";
+static constexpr const char *QX_PROBES[] = {"Q1\r", "QGS\r", "QS\r", "F\r", "I\r"};
 static constexpr int64_t POLL_INTERVAL_MS = 1000;
 static constexpr int64_t QUERY_TIMEOUT_MS = 2500;
 static constexpr int64_t STALE_AFTER_MS = 4000;
@@ -31,8 +31,17 @@ static constexpr uint32_t MAX_RECOVERY_RESTARTS = 3;
 static char qx_status[128] = "esperando dispositivo USB";
 static char last_qx_reply[128] = "";
 static portMUX_TYPE diagnostics_mux = portMUX_INITIALIZER_UNLOCKED;
-RTC_DATA_ATTR static uint32_t recovery_restart_streak;
-RTC_DATA_ATTR static uint32_t recovery_restart_total;
+static constexpr uint32_t RECOVERY_RTC_MAGIC = 0x45504752;
+
+struct RecoveryRtcState {
+    uint32_t magic;
+    uint32_t restart_streak;
+    uint32_t restart_total;
+};
+
+// RTC_NOINIT conserva los contadores durante esp_restart(). RTC_DATA_ATTR se
+// reinicializaba con la imagen y anulaba, en la práctica, el límite antibucle.
+RTC_NOINIT_ATTR static RecoveryRtcState recovery_rtc;
 
 struct UsbClient {
     usb_host_client_handle_t client;
@@ -59,6 +68,7 @@ struct UsbClient {
     int64_t recovery_deadline_ms;
     int64_t close_requested_ms;
     uint32_t overflow_streak;
+    size_t probe_index;
 };
 
 static int64_t monotonic_ms() {
@@ -141,7 +151,7 @@ static void publish_disconnected(bool record_event) {
     snapshot.usb_pid = 0;
     snapshot.consecutive_failures = 0;
     snapshot.last_usb_status = USB_TRANSFER_STATUS_NO_DEVICE;
-    snapshot.automatic_restarts = recovery_restart_total;
+    snapshot.automatic_restarts = recovery_rtc.restart_total;
     guardian_state_update(snapshot);
     set_status("esperando dispositivo USB");
     set_reply("");
@@ -191,7 +201,7 @@ static bool parse_qx_reply(const char *reply) {
     if (snapshot.monitoring_started_ms == 0) snapshot.monitoring_started_ms = now;
     snapshot.consecutive_failures = 0;
     snapshot.last_usb_status = USB_TRANSFER_STATUS_COMPLETED;
-    snapshot.automatic_restarts = recovery_restart_total;
+    snapshot.automatic_restarts = recovery_rtc.restart_total;
     if (flags[3] == '1') {
         snapshot.condition = PowerCondition::Fault;
     } else if (flags[1] == '1') {
@@ -205,7 +215,7 @@ static bool parse_qx_reply(const char *reply) {
     if (communication_was_lost) {
         guardian_record_communication_event(CommunicationEventType::Restored);
     }
-    recovery_restart_streak = 0;
+    recovery_rtc.restart_streak = 0;
     set_status("comunicación Qx estable");
     return true;
 }
@@ -250,7 +260,8 @@ static bool submit_command(UsbClient &context) {
     setup->wLength = 8;
     uint8_t *payload = context.control->data_buffer + sizeof(usb_setup_packet_t);
     memset(payload, 0, 8);
-    memcpy(payload, STATUS_QUERY, strlen(STATUS_QUERY));
+    const char *command = QX_PROBES[context.probe_index];
+    memcpy(payload, command, strlen(command));
     context.control->num_bytes = sizeof(usb_setup_packet_t) + 8;
     esp_err_t result = usb_host_transfer_submit_control(context.client, context.control);
     if (result == ESP_OK) context.control_in_flight = true;
@@ -261,11 +272,16 @@ static bool begin_query(UsbClient &context, int64_t now_ms) {
     if (context.control_in_flight || context.input_in_flight || context.recovery_pending) return false;
     context.reply_size = 0;
     memset(context.reply, 0, sizeof(context.reply));
-    if (!submit_input(context)) return false;
-    if (!submit_command(context)) return false;
     context.query_active = true;
     context.query_deadline_ms = now_ms + QUERY_TIMEOUT_MS;
     context.next_query_ms = 0;
+    // El subcontrolador Cypress de NUT escribe primero el SET_REPORT y solo
+    // después arma EP81. Armar EP81 antes podía recoger el informe saliente
+    // ("Q1\r") como si fuese una respuesta y dejar la lectura real bloqueada.
+    if (!submit_command(context)) {
+        context.query_active = false;
+        return false;
+    }
     return true;
 }
 
@@ -301,21 +317,21 @@ static bool automatic_usb_restart(usb_transfer_status_t status) {
     snapshot.data_valid = false;
     snapshot.last_usb_status = status;
     snapshot.last_error_ms = monotonic_ms();
-    if (recovery_restart_streak >= MAX_RECOVERY_RESTARTS) {
+    if (recovery_rtc.restart_streak >= MAX_RECOVERY_RESTARTS) {
         snapshot.condition = PowerCondition::CommunicationLost;
         guardian_state_update(snapshot);
         set_status("recuperación automática agotada; requiere reinicio manual");
         ESP_LOGE(TAG, "Se alcanzó el límite de reinicios USB automáticos");
         return false;
     }
-    recovery_restart_streak++;
-    recovery_restart_total++;
-    snapshot.automatic_restarts = recovery_restart_total;
+    recovery_rtc.restart_streak++;
+    recovery_rtc.restart_total++;
+    snapshot.automatic_restarts = recovery_rtc.restart_total;
     guardian_state_update(snapshot);
     guardian_record_communication_event(CommunicationEventType::AutomaticRestart, status);
     set_status("reiniciando el bus USB tras errores persistentes");
     ESP_LOGE(TAG, "Reinicio controlado %lu/%lu por error USB %d",
-             static_cast<unsigned long>(recovery_restart_streak),
+             static_cast<unsigned long>(recovery_rtc.restart_streak),
              static_cast<unsigned long>(MAX_RECOVERY_RESTARTS), status);
     vTaskDelay(pdMS_TO_TICKS(750));
     esp_restart();
@@ -329,7 +345,7 @@ static void handle_failure(UsbClient &context, usb_transfer_status_t status,
     snapshot.consecutive_failures++;
     snapshot.last_usb_status = status;
     snapshot.last_error_ms = now_ms;
-    snapshot.automatic_restarts = recovery_restart_total;
+    snapshot.automatic_restarts = recovery_rtc.restart_total;
     if (status == USB_TRANSFER_STATUS_OVERFLOW) {
         context.overflow_streak++;
     } else {
@@ -373,24 +389,32 @@ static bool append_input(UsbClient &context) {
     return true;
 }
 
-static bool process_reply(UsbClient &context) {
+enum class ReplyResult {
+    Incomplete,
+    Valid,
+    CypressEcho,
+};
+
+static ReplyResult process_reply(UsbClient &context) {
     char *frame = strchr(context.reply, '(');
     if (frame) {
         char *end = strchr(frame, '\r');
         if (end) {
             end[1] = '\0';
             set_reply(frame);
-            return parse_qx_reply(frame);
+            return parse_qx_reply(frame) ? ReplyResult::Valid : ReplyResult::Incomplete;
         }
     }
     if (strchr(context.reply, '\r')) {
-        // Algunos puentes Cypress devuelven primero el eco de Q1. Se descarta
-        // el eco, pero se mantiene la misma transacción y su tiempo límite.
+        // En 0665:5161 el primer informe de entrada puede ser el eco HID del
+        // SET_REPORT. La respuesta serie aparece al cebar una nueva consulta;
+        // dejar una lectura EP81 pendiente aquí termina siempre en timeout.
         set_reply(context.reply);
         context.reply_size = 0;
         memset(context.reply, 0, sizeof(context.reply));
+        return ReplyResult::CypressEcho;
     }
-    return false;
+    return ReplyResult::Incomplete;
 }
 
 static void mark_stale_if_needed(int64_t now_ms) {
@@ -450,7 +474,7 @@ static void open_device(UsbClient &context, int64_t now_ms) {
     snapshot.usb_pid = descriptor->idProduct;
     snapshot.condition = PowerCondition::Starting;
     snapshot.data_valid = false;
-    snapshot.automatic_restarts = recovery_restart_total;
+    snapshot.automatic_restarts = recovery_rtc.restart_total;
     guardian_state_update(snapshot);
     ESP_LOGI(TAG, "USB detectado %04x:%04x", descriptor->idVendor, descriptor->idProduct);
 
@@ -495,7 +519,7 @@ static void client_task(void *) {
         return;
     }
     GuardianSnapshot startup = guardian_state_get();
-    startup.automatic_restarts = recovery_restart_total;
+    startup.automatic_restarts = recovery_rtc.restart_total;
     guardian_state_update(startup);
     publish_disconnected(false);
 
@@ -509,6 +533,10 @@ static void client_task(void *) {
             context.control_event = false;
             if (!context.recovery_pending && context.control_status != USB_TRANSFER_STATUS_COMPLETED) {
                 handle_failure(context, context.control_status, now_ms, "fallo SET_REPORT Q1");
+            } else if (!context.recovery_pending && context.query_active &&
+                       !context.input_in_flight && !submit_input(context)) {
+                handle_failure(context, USB_TRANSFER_STATUS_ERROR, now_ms,
+                               "no se pudo iniciar la lectura Q1");
             }
         }
 
@@ -518,10 +546,19 @@ static void client_task(void *) {
                 // Cancelación solicitada por la propia recuperación.
             } else if (context.input_status == USB_TRANSFER_STATUS_COMPLETED &&
                        append_input(context)) {
-                if (process_reply(context)) {
+                const ReplyResult reply_result = process_reply(context);
+                if (reply_result == ReplyResult::Valid) {
                     context.query_active = false;
                     context.overflow_streak = 0;
+                    context.probe_index = 0;
                     context.next_query_ms = now_ms + POLL_INTERVAL_MS;
+                } else if (reply_result == ReplyResult::CypressEcho) {
+                    context.query_active = false;
+                    context.probe_index = (context.probe_index + 1) %
+                        (sizeof(QX_PROBES) / sizeof(QX_PROBES[0]));
+                    context.next_query_ms = now_ms + 200;
+                    set_status("eco Cypress recibido; probando consulta %s",
+                               QX_PROBES[context.probe_index]);
                 } else if (context.query_active && now_ms < context.query_deadline_ms) {
                     if (!submit_input(context)) {
                         handle_failure(context, USB_TRANSFER_STATUS_ERROR, now_ms,
@@ -598,6 +635,13 @@ static void usb_start_task(void *) {
 }
 
 void usb_monitor_start() {
+    if (recovery_rtc.magic != RECOVERY_RTC_MAGIC) {
+        recovery_rtc = {
+            .magic = RECOVERY_RTC_MAGIC,
+            .restart_streak = 0,
+            .restart_total = 0,
+        };
+    }
     if (xTaskCreate(usb_start_task, "usb_start", 3072, nullptr, 3, nullptr) != pdPASS) {
         set_status("no se pudo iniciar la tarea USB Host");
         ESP_LOGE(TAG, "No se pudo iniciar la tarea USB Host");
