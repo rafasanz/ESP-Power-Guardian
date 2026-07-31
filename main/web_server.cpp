@@ -164,6 +164,12 @@ static esp_err_t communication_history_handler(httpd_req_t *request) {
     return httpd_resp_send(request, json.data(), json.size());
 }
 
+static esp_err_t clear_communication_history_handler(httpd_req_t *request) {
+    guardian_clear_communication_history();
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
+}
+
 static esp_err_t outage_history_handler(httpd_req_t *request) {
     GuardianOutage outages[10] = {};
     size_t count = guardian_outage_history(outages, 10);
@@ -179,6 +185,12 @@ static esp_err_t outage_history_handler(httpd_req_t *request) {
     json += "]";
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_send(request, json.data(), json.size());
+}
+
+static esp_err_t clear_outage_history_handler(httpd_req_t *request) {
+    guardian_clear_outage_history();
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
 static esp_err_t led_get_handler(httpd_req_t *request) {
@@ -428,7 +440,9 @@ void web_server_start() {
         {.uri="/", .method=HTTP_GET, .handler=index_handler, .user_ctx=nullptr},
         {.uri="/api/status", .method=HTTP_GET, .handler=status_handler, .user_ctx=nullptr},
         {.uri="/api/outages", .method=HTTP_GET, .handler=outage_history_handler, .user_ctx=nullptr},
+        {.uri="/api/outages/clear", .method=HTTP_POST, .handler=clear_outage_history_handler, .user_ctx=nullptr},
         {.uri="/api/communication-events", .method=HTTP_GET, .handler=communication_history_handler, .user_ctx=nullptr},
+        {.uri="/api/communication-events/clear", .method=HTTP_POST, .handler=clear_communication_history_handler, .user_ctx=nullptr},
         {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler, .user_ctx=nullptr},
         {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler, .user_ctx=nullptr},
         {.uri="/api/led/test", .method=HTTP_POST, .handler=led_test_handler, .user_ctx=nullptr},

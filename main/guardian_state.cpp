@@ -182,12 +182,26 @@ size_t guardian_communication_history(GuardianCommunicationEvent *events, size_t
     return count;
 }
 
+void guardian_clear_communication_history() {
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    communication_count = 0;
+    xSemaphoreGive(state_mutex);
+    persist_communication_events();
+}
+
 size_t guardian_outage_history(GuardianOutage *outages, size_t capacity) {
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     size_t count = outage_count < capacity ? outage_count : capacity;
     for (size_t i = 0; i < count; ++i) outages[i] = outage_history[i];
     xSemaphoreGive(state_mutex);
     return count;
+}
+
+void guardian_clear_outage_history() {
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    outage_count = 0;
+    xSemaphoreGive(state_mutex);
+    persist_outages();
 }
 
 const char *guardian_nut_status(PowerCondition condition) {
