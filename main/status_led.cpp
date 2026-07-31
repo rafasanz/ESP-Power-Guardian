@@ -90,6 +90,8 @@ static uint32_t color_for(PowerCondition condition, const LedPalette &p) {
         case PowerCondition::OnBattery: return p.on_battery;
         case PowerCondition::LowBattery: return p.low_battery;
         case PowerCondition::Fault: return p.fault;
+        case PowerCondition::CommunicationLost: return p.disconnected;
+        case PowerCondition::Recovering: return p.starting;
         case PowerCondition::Disconnected: return p.disconnected;
     }
     return 0;
@@ -102,6 +104,8 @@ static bool blink_for(PowerCondition condition, const LedPalette &p) {
         case PowerCondition::OnBattery: return p.blink_on_battery;
         case PowerCondition::LowBattery: return p.blink_low_battery;
         case PowerCondition::Fault: return p.blink_fault;
+        case PowerCondition::CommunicationLost: return p.blink_disconnected;
+        case PowerCondition::Recovering: return p.blink_starting;
         case PowerCondition::Disconnected: return p.blink_disconnected;
     }
     return false;
@@ -134,7 +138,10 @@ static void led_task(void *) {
                 static_cast<uint8_t>((((rgb >> 16) & 0xff) * scale) / 255),
                 static_cast<uint8_t>(((rgb & 0xff) * scale) / 255),
             };
-            rmt_transmit_config_t cfg = {.loop_count = 0};
+            rmt_transmit_config_t cfg = {
+                .loop_count = 0,
+                .flags = {.eot_level = 0, .queue_nonblocking = 0},
+            };
             rmt_transmit(channel, encoder, grb, sizeof(grb), &cfg);
             rmt_tx_wait_all_done(channel, pdMS_TO_TICKS(100));
             previous_signature = signature;

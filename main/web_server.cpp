@@ -76,6 +76,27 @@ static std::string hex_color(uint32_t color) {
     return text;
 }
 
+static std::string json_escape(const char *text) {
+    std::string escaped;
+    if (!text) return escaped;
+    while (*text) {
+        const unsigned char character = static_cast<unsigned char>(*text++);
+        switch (character) {
+            case '"': escaped += "\\\""; break;
+            case '\\': escaped += "\\\\"; break;
+            case '\b': escaped += "\\b"; break;
+            case '\f': escaped += "\\f"; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (character >= 0x20) escaped += static_cast<char>(character);
+                break;
+        }
+    }
+    return escaped;
+}
+
 static esp_err_t index_handler(httpd_req_t *request) {
     httpd_resp_set_type(request, "text/html; charset=utf-8");
     return httpd_resp_send(request, WEB_PAGE, HTTPD_RESP_USE_STRLEN);
@@ -86,29 +107,61 @@ static esp_err_t status_handler(httpd_req_t *request) {
     wifi_ap_record_t access_point = {};
     int rssi = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK ? access_point.rssi : 0;
     int64_t uptime = esp_timer_get_time() / 1000000;
-    int64_t age = s.last_update_ms > 0 ? (esp_timer_get_time() / 1000 - s.last_update_ms) / 1000 : -1;
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t age = s.last_update_ms > 0 ? (now_ms - s.last_update_ms) / 1000 : -1;
+    int64_t monitoring = s.monitoring_started_ms > 0 ? (now_ms - s.monitoring_started_ms) / 1000 : 0;
+    int64_t error_age = s.last_error_ms > 0 ? (now_ms - s.last_error_ms) / 1000 : -1;
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char mac_text[18] = {};
     snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    char json[1024];
+    char qx_status[128] = {};
+    char qx_reply[128] = {};
+    usb_monitor_copy_status(qx_status, sizeof(qx_status));
+    usb_monitor_copy_reply(qx_reply, sizeof(qx_reply));
+    const std::string escaped_status = json_escape(qx_status);
+    const std::string escaped_reply = json_escape(qx_reply);
+    char json[1536];
     snprintf(json, sizeof(json),
              "{\"firmware\":\"%s\",\"condition\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
              "\"mac\":\"%s\",\"recovery_ap\":%s,\"rssi\":%d,\"uptime_s\":%lld,\"nut_port\":3493,\"ups_status\":\"%s\","
              "\"usb_vid\":\"%04x\",\"usb_pid\":\"%04x\",\"qx_status\":\"%s\",\"qx_reply\":\"%s\","
-             "\"data_valid\":%s,\"last_data_age_s\":%lld,\"input_voltage\":%.1f,"
+             "\"data_valid\":%s,\"last_data_age_s\":%lld,\"monitoring_s\":%lld,"
+             "\"last_error_age_s\":%lld,\"consecutive_failures\":%lu,\"recovery_count\":%lu,"
+             "\"automatic_restarts\":%lu,\"last_usb_status\":%d,\"input_voltage\":%.1f,"
              "\"output_voltage\":%.1f,\"frequency\":%.1f,\"battery_voltage\":%.1f,"
              "\"battery\":%d,\"runtime_s\":%d,\"load\":%d}",
              EPG_VERSION, guardian_condition_name(s.condition),
              wifi_manager_connected() ? "conectado" : "sin conexión", wifi_manager_ip(),
              mac_text, wifi_manager_ap_active() ? "true" : "false", rssi,
              static_cast<long long>(uptime), guardian_nut_status(s.condition),
-             s.usb_vid, s.usb_pid, usb_monitor_status(), usb_monitor_reply(), s.data_valid ? "true" : "false",
-             static_cast<long long>(age), s.input_voltage, s.output_voltage, s.frequency,
+             s.usb_vid, s.usb_pid, escaped_status.c_str(), escaped_reply.c_str(),
+             s.data_valid ? "true" : "false", static_cast<long long>(age),
+             static_cast<long long>(monitoring), static_cast<long long>(error_age),
+             static_cast<unsigned long>(s.consecutive_failures),
+             static_cast<unsigned long>(s.recovery_count),
+             static_cast<unsigned long>(s.automatic_restarts), s.last_usb_status,
+             s.input_voltage, s.output_voltage, s.frequency,
              s.battery_voltage, s.battery_percent, s.runtime_seconds, s.load_percent);
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, json);
+}
+
+static esp_err_t communication_history_handler(httpd_req_t *request) {
+    GuardianCommunicationEvent events[10] = {};
+    size_t count = guardian_communication_history(events, 10);
+    std::string json = "[";
+    for (size_t reverse = count; reverse > 0; --reverse) {
+        const GuardianCommunicationEvent &event = events[reverse - 1];
+        if (reverse != count) json += ",";
+        json += "{\"epoch\":" + std::to_string(event.epoch) +
+                ",\"type\":\"" + guardian_communication_event_name(event.type) +
+                "\",\"detail\":" + std::to_string(event.detail) + "}";
+    }
+    json += "]";
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_send(request, json.data(), json.size());
 }
 
 static esp_err_t outage_history_handler(httpd_req_t *request) {
@@ -372,16 +425,17 @@ void web_server_start() {
         return;
     }
     const httpd_uri_t routes[] = {
-        {.uri="/", .method=HTTP_GET, .handler=index_handler},
-        {.uri="/api/status", .method=HTTP_GET, .handler=status_handler},
-        {.uri="/api/outages", .method=HTTP_GET, .handler=outage_history_handler},
-        {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler},
-        {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler},
-        {.uri="/api/led/test", .method=HTTP_POST, .handler=led_test_handler},
-        {.uri="/api/network", .method=HTTP_GET, .handler=network_get_handler},
-        {.uri="/api/wifi", .method=HTTP_POST, .handler=wifi_post_handler},
-        {.uri="/api/wifi/scan", .method=HTTP_GET, .handler=wifi_scan_handler},
-        {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler},
+        {.uri="/", .method=HTTP_GET, .handler=index_handler, .user_ctx=nullptr},
+        {.uri="/api/status", .method=HTTP_GET, .handler=status_handler, .user_ctx=nullptr},
+        {.uri="/api/outages", .method=HTTP_GET, .handler=outage_history_handler, .user_ctx=nullptr},
+        {.uri="/api/communication-events", .method=HTTP_GET, .handler=communication_history_handler, .user_ctx=nullptr},
+        {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler, .user_ctx=nullptr},
+        {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler, .user_ctx=nullptr},
+        {.uri="/api/led/test", .method=HTTP_POST, .handler=led_test_handler, .user_ctx=nullptr},
+        {.uri="/api/network", .method=HTTP_GET, .handler=network_get_handler, .user_ctx=nullptr},
+        {.uri="/api/wifi", .method=HTTP_POST, .handler=wifi_post_handler, .user_ctx=nullptr},
+        {.uri="/api/wifi/scan", .method=HTTP_GET, .handler=wifi_scan_handler, .user_ctx=nullptr},
+        {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler, .user_ctx=nullptr},
     };
     for (const auto &route : routes) {
         result = httpd_register_uri_handler(server, &route);

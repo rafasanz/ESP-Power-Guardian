@@ -10,7 +10,11 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
 
 ## Funciones actuales
 
-- USB Host en ESP32-S3 y consulta Qx del SAI.
+- USB Host en ESP32-S3 y controlador Qx/Cypress para `0665:5161`.
+- Sondeo `Q1` cada segundo con una única transacción pendiente.
+- Caducidad de datos: un estado antiguo nunca se conserva como `OL` válido.
+- Watchdog de consulta, recuperación del endpoint `0x81` y reinicio controlado
+  del bus ante bloqueos persistentes.
 - Estado de alimentación, tensiones, frecuencia, carga, batería y autonomía.
 - Servidor NUT compatible con `aionut 4.3.4` y la integración oficial de Home
   Assistant.
@@ -22,6 +26,8 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
   guardada no puede recuperarse.
 - Actualizaciones OTA desde el navegador con reinicio automático.
 - Historial persistente de los diez últimos cortes eléctricos.
+- Historial persistente e independiente de pérdidas, recuperaciones,
+  desconexiones y reinicios de comunicación.
 - Servidor HTTP/JSON para consulta e integración local.
 - LED RGB con colores, brillo y parpadeo configurables por estado.
 - Apariencia configurable: modo, tema, tipografía, tamaño, espaciado y bordes.
@@ -55,7 +61,31 @@ Añade la integración oficial **Network UPS Tools (NUT)** con estos datos:
 
 El servidor anuncia un SAI con el nombre `guardian` y publica información del
 dispositivo, MAC, firmware y variables eléctricas. Mientras no haya un SAI
-conectado, `ups.status` se publica como `OFF`.
+conectado o los datos Qx estén obsoletos, `ups.status` se publica como `OFF` y
+las variables eléctricas antiguas dejan de anunciarse.
+
+## Estabilidad USB/Qx
+
+Los Salicru SPS ONE que utilizan el puente Cypress `0665:5161` pueden bloquear
+ocasionalmente el endpoint de entrada al entregar una trama mayor que los ocho
+bytes declarados. El firmware trata explícitamente esta situación:
+
+1. Consulta únicamente el estado `Q1`, cada segundo y sin solapar peticiones.
+2. Exige que la respuesta completa llegue dentro de 2,5 segundos.
+3. Considera obsoletos los datos que superan cuatro segundos sin renovación.
+4. Detiene, vacía y reactiva el endpoint `0x81` tras un fallo.
+5. Si se producen tres desbordamientos consecutivos o seis fallos seguidos,
+   reinicia de forma controlada el ESP32 y, con ello, el controlador USB.
+6. Limita a tres los reinicios consecutivos sin una lectura válida para evitar
+   bucles de arranque. Una respuesta correcta devuelve el contador a cero.
+
+El LED solo utiliza el color de alimentación de red cuando existe una lectura
+reciente. Durante una recuperación usa el estado de inicio y, si la
+comunicación queda obsoleta, el estado configurado para SAI desconectado.
+
+Un fallo de comunicación no se registra como corte eléctrico. Si el SAI estaba
+funcionando con batería cuando se pierde la comunicación, el corte permanece
+abierto hasta que una lectura válida confirme que volvió la red.
 
 ## Estados del LED
 
@@ -77,6 +107,7 @@ La interfaz **Información** documenta los endpoints disponibles:
 
 - `GET /api/status`
 - `GET /api/outages`
+- `GET /api/communication-events`
 - `GET /api/network`
 - `GET /api/wifi/scan`
 - `POST /api/wifi`
@@ -87,6 +118,19 @@ La interfaz **Información** documenta los endpoints disponibles:
 
 La API no incorpora autenticación y debe utilizarse únicamente dentro de una
 red local de confianza.
+
+`GET /api/status` incluye, además de las medidas, la edad del último dato y del
+último error, fallos consecutivos, recuperaciones del endpoint, reinicios
+automáticos y último resultado de transferencia USB.
+
+## Compatibilidad de SAI
+
+La revisión actual prioriza la estabilidad del Salicru SPS ONE con
+`0665:5161`, cuyo transporte es Qx/Megatec sobre un puente USB Cypress. La capa
+de estado, NUT, API, LED y web está desacoplada del transporte para poder añadir
+un controlador USB HID Power Device genérico en una revisión posterior sin
+alterar las integraciones existentes. Un dispositivo HID desconocido se marca
+como no compatible; nunca se presenta falsamente como conectado o `OL`.
 
 ## Compilación
 

@@ -45,6 +45,7 @@ static size_t variables(NutVariable *vars, size_t capacity) {
     set_variable(vars[count++], "driver.version", EPG_VERSION);
     set_variable(vars[count++], "ups.firmware", EPG_VERSION);
     set_variable(vars[count++], "ups.status", guardian_nut_status(s.condition));
+    if (!s.data_valid) return count;
     snprintf(number, sizeof(number), "%.1f", s.input_voltage);
     set_variable(vars[count++], "input.voltage", number);
     snprintf(number, sizeof(number), "%.1f", s.output_voltage);
