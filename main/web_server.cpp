@@ -5,6 +5,9 @@
 #include <string>
 
 #include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -12,9 +15,12 @@
 
 #include "guardian_state.h"
 #include "settings.h"
+#include "status_led.h"
 #include "usb_monitor.h"
 #include "wifi_manager.h"
 #include "web_ui.h"
+
+static const char *TAG = "web";
 
 static const char PAGE[] = R"HTML(<!doctype html><html lang="es"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -81,17 +87,23 @@ static esp_err_t status_handler(httpd_req_t *request) {
     int rssi = esp_wifi_sta_get_ap_info(&access_point) == ESP_OK ? access_point.rssi : 0;
     int64_t uptime = esp_timer_get_time() / 1000000;
     int64_t age = s.last_update_ms > 0 ? (esp_timer_get_time() / 1000 - s.last_update_ms) / 1000 : -1;
-    char json[960];
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_text[18] = {};
+    snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    char json[1024];
     snprintf(json, sizeof(json),
              "{\"firmware\":\"%s\",\"condition\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
-             "\"rssi\":%d,\"uptime_s\":%lld,\"nut_port\":3493,\"ups_status\":\"%s\","
+             "\"mac\":\"%s\",\"recovery_ap\":%s,\"rssi\":%d,\"uptime_s\":%lld,\"nut_port\":3493,\"ups_status\":\"%s\","
              "\"usb_vid\":\"%04x\",\"usb_pid\":\"%04x\",\"qx_status\":\"%s\",\"qx_reply\":\"%s\","
              "\"data_valid\":%s,\"last_data_age_s\":%lld,\"input_voltage\":%.1f,"
              "\"output_voltage\":%.1f,\"frequency\":%.1f,\"battery_voltage\":%.1f,"
              "\"battery\":%d,\"runtime_s\":%d,\"load\":%d}",
              EPG_VERSION, guardian_condition_name(s.condition),
              wifi_manager_connected() ? "conectado" : "sin conexión", wifi_manager_ip(),
-             rssi, static_cast<long long>(uptime), guardian_nut_status(s.condition),
+             mac_text, wifi_manager_ap_active() ? "true" : "false", rssi,
+             static_cast<long long>(uptime), guardian_nut_status(s.condition),
              s.usb_vid, s.usb_pid, usb_monitor_status(), usb_monitor_reply(), s.data_valid ? "true" : "false",
              static_cast<long long>(age), s.input_voltage, s.output_voltage, s.frequency,
              s.battery_voltage, s.battery_percent, s.runtime_seconds, s.load_percent);
@@ -106,9 +118,9 @@ static esp_err_t outage_history_handler(httpd_req_t *request) {
     for (size_t reverse = count; reverse > 0; --reverse) {
         const GuardianOutage &outage = outages[reverse - 1];
         if (reverse != count) json += ",";
-        json += "{\"started_s\":" + std::to_string(outage.started_ms / 1000) +
-                ",\"ended_s\":" + std::to_string(outage.ended_ms / 1000) +
-                ",\"active\":" + (outage.ended_ms == 0 ? "true" : "false") +
+        json += "{\"started_epoch\":" + std::to_string(outage.started_epoch) +
+                ",\"ended_epoch\":" + std::to_string(outage.ended_epoch) +
+                ",\"active\":" + (outage.ended_epoch == 0 ? "true" : "false") +
                 ",\"condition\":\"" + guardian_condition_name(outage.condition) + "\"}";
     }
     json += "]";
@@ -122,7 +134,13 @@ static esp_err_t led_get_handler(httpd_req_t *request) {
         hex_color(p.online) + "\",\"on_battery\":\"" + hex_color(p.on_battery) +
         "\",\"low_battery\":\"" + hex_color(p.low_battery) + "\",\"fault\":\"" +
         hex_color(p.fault) + "\",\"disconnected\":\"" + hex_color(p.disconnected) +
-        "\",\"brightness\":" + std::to_string(p.brightness) + "}";
+        "\",\"brightness\":" + std::to_string(p.brightness) +
+        ",\"blink_starting\":" + (p.blink_starting ? "true" : "false") +
+        ",\"blink_online\":" + (p.blink_online ? "true" : "false") +
+        ",\"blink_on_battery\":" + (p.blink_on_battery ? "true" : "false") +
+        ",\"blink_low_battery\":" + (p.blink_low_battery ? "true" : "false") +
+        ",\"blink_fault\":" + (p.blink_fault ? "true" : "false") +
+        ",\"blink_disconnected\":" + (p.blink_disconnected ? "true" : "false") + "}";
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_send(request, json.data(), json.size());
 }
@@ -139,6 +157,14 @@ static bool json_string(const std::string &json, const char *key, char *out, siz
     return true;
 }
 
+static bool json_bool(const std::string &json, const char *key, bool fallback) {
+    std::string marker = std::string("\"") + key + "\":";
+    size_t begin = json.find(marker);
+    if (begin == std::string::npos) return fallback;
+    begin += marker.size();
+    return json.compare(begin, 4, "true") == 0;
+}
+
 static esp_err_t led_post_handler(httpd_req_t *request) {
     std::string body(request->content_len, '\0');
     if (httpd_req_recv(request, body.data(), body.size()) <= 0) return ESP_FAIL;
@@ -150,10 +176,81 @@ static esp_err_t led_post_handler(httpd_req_t *request) {
     if (json_string(body, "low_battery", value, sizeof(value))) p.low_battery = color_from_hex(value);
     if (json_string(body, "fault", value, sizeof(value))) p.fault = color_from_hex(value);
     if (json_string(body, "disconnected", value, sizeof(value))) p.disconnected = color_from_hex(value);
+    p.blink_starting = json_bool(body, "blink_starting", p.blink_starting);
+    p.blink_online = json_bool(body, "blink_online", p.blink_online);
+    p.blink_on_battery = json_bool(body, "blink_on_battery", p.blink_on_battery);
+    p.blink_low_battery = json_bool(body, "blink_low_battery", p.blink_low_battery);
+    p.blink_fault = json_bool(body, "blink_fault", p.blink_fault);
+    p.blink_disconnected = json_bool(body, "blink_disconnected", p.blink_disconnected);
     size_t brightness = body.find("\"brightness\":");
     if (brightness != std::string::npos) p.brightness = atoi(body.c_str() + brightness + 13);
     bool ok = settings_set_led_palette(p);
     return httpd_resp_sendstr(request, ok ? "Colores guardados." : "No se pudo guardar.");
+}
+
+static esp_err_t led_test_handler(httpd_req_t *request) {
+    std::string body(request->content_len, '\0');
+    if (httpd_req_recv(request, body.data(), body.size()) <= 0) return ESP_FAIL;
+    char color[16] = {};
+    if (!json_string(body, "color", color, sizeof(color))) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        return httpd_resp_sendstr(request, "Color no válido.");
+    }
+    status_led_test(color_from_hex(color), json_bool(body, "blink", false), 5000);
+    return httpd_resp_sendstr(request, "Prueba iniciada durante 5 segundos.");
+}
+
+static bool valid_ipv4(const char *value) {
+    esp_ip4_addr_t address = {};
+    return value[0] != '\0' && esp_netif_str_to_ip4(value, &address) == ESP_OK;
+}
+
+static int form_hex_digit(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+static bool form_value(const std::string &body, const char *key,
+                       char *output, size_t output_size) {
+    char encoded[256] = {};
+    output[0] = '\0';
+    if (httpd_query_key_value(body.c_str(), key, encoded, sizeof(encoded)) != ESP_OK) {
+        return false;
+    }
+    size_t written = 0;
+    for (size_t read = 0; encoded[read] != '\0'; ++read) {
+        unsigned char decoded = static_cast<unsigned char>(encoded[read]);
+        if (encoded[read] == '+') {
+            decoded = ' ';
+        } else if (encoded[read] == '%' && encoded[read + 1] && encoded[read + 2]) {
+            int high = form_hex_digit(encoded[read + 1]);
+            int low = form_hex_digit(encoded[read + 2]);
+            if (high < 0 || low < 0) return false;
+            decoded = static_cast<unsigned char>((high << 4) | low);
+            read += 2;
+        }
+        if (written + 1 >= output_size) return false;
+        output[written++] = static_cast<char>(decoded);
+    }
+    output[written] = '\0';
+    return true;
+}
+
+static esp_err_t network_get_handler(httpd_req_t *request) {
+    NetworkSettings network = settings_network();
+    char ssid[33] = {}, password[65] = {};
+    settings_wifi_credentials(ssid, sizeof(ssid), password, sizeof(password));
+    std::string safe_ssid = ssid;
+    for (char &character : safe_ssid) {
+        if (character == '"' || character == '\\') character = '_';
+    }
+    std::string json = std::string("{\"mode\":\"") + (network.dhcp ? "dhcp" : "static") +
+        "\",\"ssid\":\"" + safe_ssid + "\",\"ip\":\"" + network.ip + "\",\"gateway\":\"" + network.gateway +
+        "\",\"netmask\":\"" + network.netmask + "\",\"dns\":\"" + network.dns + "\"}";
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_send(request, json.data(), json.size());
 }
 
 static esp_err_t wifi_post_handler(httpd_req_t *request) {
@@ -161,31 +258,66 @@ static esp_err_t wifi_post_handler(httpd_req_t *request) {
     int received = httpd_req_recv(request, body.data(), request->content_len);
     if (received <= 0) return ESP_FAIL;
     char ssid[33] = {}, password[65] = {};
-    httpd_query_key_value(body.c_str(), "ssid", ssid, sizeof(ssid));
-    httpd_query_key_value(body.c_str(), "password", password, sizeof(password));
-    if (!settings_set_wifi_credentials(ssid, password)) {
+    char mode[8] = "dhcp", ip[16] = {}, gateway[16] = {}, netmask[16] = {}, dns[16] = {};
+    if (!form_value(body, "ssid", ssid, sizeof(ssid)) ||
+        !form_value(body, "password", password, sizeof(password)) ||
+        !form_value(body, "mode", mode, sizeof(mode)) ||
+        !form_value(body, "ip", ip, sizeof(ip)) ||
+        !form_value(body, "gateway", gateway, sizeof(gateway)) ||
+        !form_value(body, "netmask", netmask, sizeof(netmask)) ||
+        !form_value(body, "dns", dns, sizeof(dns))) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        return httpd_resp_sendstr(request, "La configuración contiene un valor no válido o demasiado largo.");
+    }
+    char current_ssid[33] = {}, current_password[65] = {};
+    settings_wifi_credentials(current_ssid, sizeof(current_ssid),
+                              current_password, sizeof(current_password));
+    if (ssid[0] == '\0') strlcpy(ssid, current_ssid, sizeof(ssid));
+    if (password[0] == '\0') strlcpy(password, current_password, sizeof(password));
+    NetworkSettings network = settings_network();
+    network.dhcp = strcmp(mode, "static") != 0;
+    if (!network.dhcp) {
+        if (!valid_ipv4(ip) || !valid_ipv4(gateway) || !valid_ipv4(netmask) || !valid_ipv4(dns)) {
+            httpd_resp_set_status(request, "400 Bad Request");
+            return httpd_resp_sendstr(request, "Revisa la IP, puerta de enlace, máscara y DNS.");
+        }
+        strlcpy(network.ip, ip, sizeof(network.ip));
+        strlcpy(network.gateway, gateway, sizeof(network.gateway));
+        strlcpy(network.netmask, netmask, sizeof(network.netmask));
+        strlcpy(network.dns, dns, sizeof(network.dns));
+    }
+    if (!settings_set_wifi_credentials(ssid, password) || !settings_set_network(network)) {
         httpd_resp_set_status(request, "500 Internal Server Error");
         return httpd_resp_sendstr(request, "No se pudo guardar la red.");
     }
-    httpd_resp_sendstr(request, "Configuración guardada. Reiniciando…");
+    httpd_resp_sendstr(request, "Configuración guardada. Reiniciando… El punto de acceso seguirá disponible para consultar la nueva IP.");
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
     return ESP_OK;
 }
 
 static esp_err_t wifi_scan_handler(httpd_req_t *request) {
-    wifi_scan_config_t scan = {};
-    if (esp_wifi_scan_start(&scan, true) != ESP_OK) {
-        httpd_resp_set_status(request, "503 Service Unavailable");
+    WifiScanState state = wifi_manager_scan_state();
+    if (state == WifiScanState::idle || state == WifiScanState::failed) {
+        state = wifi_manager_start_scan();
+    }
+    if (state == WifiScanState::running) {
+        httpd_resp_set_status(request, "202 Accepted");
+        httpd_resp_set_type(request, "application/json");
         return httpd_resp_sendstr(request, "[]");
     }
-    uint16_t count = 12;
-    wifi_ap_record_t records[12] = {};
-    esp_wifi_scan_get_ap_records(&count, records);
+    if (state != WifiScanState::ready) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        httpd_resp_set_type(request, "application/json");
+        return httpd_resp_sendstr(request, "[]");
+    }
+
+    WifiScanResult records[12] = {};
+    size_t count = wifi_manager_scan_results(records, 12);
     std::string json = "[";
-    for (uint16_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (i) json += ",";
-        std::string ssid(reinterpret_cast<const char *>(records[i].ssid));
+        std::string ssid(records[i].ssid);
         for (char &character : ssid) {
             if (character == '"' || character == '\\') character = '_';
         }
@@ -194,6 +326,12 @@ static esp_err_t wifi_scan_handler(httpd_req_t *request) {
     json += "]";
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_send(request, json.data(), json.size());
+}
+
+static void delayed_restart_task(void *) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Reinicio diferido después de OTA");
+    esp_restart();
 }
 
 static esp_err_t ota_handler(httpd_req_t *request) {
@@ -212,26 +350,46 @@ static esp_err_t ota_handler(httpd_req_t *request) {
         remaining -= received;
     }
     if (esp_ota_end(handle) != ESP_OK || esp_ota_set_boot_partition(partition) != ESP_OK) return ESP_FAIL;
-    httpd_resp_sendstr(request, "Firmware instalado. Reiniciando…");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
+    esp_err_t response =
+        httpd_resp_sendstr(request, "Firmware instalado. Reiniciando…");
+    if (response != ESP_OK) return response;
+    if (xTaskCreate(delayed_restart_task, "ota_restart", 2048, nullptr, 8, nullptr) !=
+        pdPASS) {
+        ESP_LOGE(TAG, "No se pudo programar el reinicio posterior a la OTA");
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
 void web_server_start() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    httpd_handle_t server;
-    ESP_ERROR_CHECK(httpd_start(&server, &config));
+    config.max_uri_handlers = 16;
+    httpd_handle_t server = nullptr;
+    esp_err_t result = httpd_start(&server, &config);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "No se pudo iniciar el servidor web: %s", esp_err_to_name(result));
+        return;
+    }
     const httpd_uri_t routes[] = {
         {.uri="/", .method=HTTP_GET, .handler=index_handler},
         {.uri="/api/status", .method=HTTP_GET, .handler=status_handler},
         {.uri="/api/outages", .method=HTTP_GET, .handler=outage_history_handler},
         {.uri="/api/led", .method=HTTP_GET, .handler=led_get_handler},
         {.uri="/api/led", .method=HTTP_POST, .handler=led_post_handler},
+        {.uri="/api/led/test", .method=HTTP_POST, .handler=led_test_handler},
+        {.uri="/api/network", .method=HTTP_GET, .handler=network_get_handler},
         {.uri="/api/wifi", .method=HTTP_POST, .handler=wifi_post_handler},
         {.uri="/api/wifi/scan", .method=HTTP_GET, .handler=wifi_scan_handler},
         {.uri="/api/ota", .method=HTTP_POST, .handler=ota_handler},
     };
-    for (const auto &route : routes) ESP_ERROR_CHECK(httpd_register_uri_handler(server, &route));
+    for (const auto &route : routes) {
+        result = httpd_register_uri_handler(server, &route);
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "No se pudo registrar %s (%d): %s",
+                     route.uri, route.method, esp_err_to_name(result));
+        }
+    }
+    ESP_LOGI(TAG, "Servidor web iniciado con %u rutas",
+             static_cast<unsigned>(sizeof(routes) / sizeof(routes[0])));
 }

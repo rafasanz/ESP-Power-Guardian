@@ -3,9 +3,9 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <vector>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -15,41 +15,69 @@
 static const char *TAG = "nut_server";
 static constexpr const char *UPS_NAME = "guardian";
 
-static std::vector<std::pair<std::string, std::string>> variables() {
+struct NutVariable {
+    const char *name;
+    char value[48];
+};
+
+static void set_variable(NutVariable &variable, const char *name,
+                         const char *value) {
+    variable.name = name;
+    strlcpy(variable.value, value, sizeof(variable.value));
+}
+
+static size_t variables(NutVariable *vars, size_t capacity) {
+    if (capacity < 16) return 0;
     GuardianSnapshot s = guardian_state_get();
     char number[32];
-    std::vector<std::pair<std::string, std::string>> vars = {
-        {"device.mfr", "ESP Power Guardian"},
-        {"device.model", "USB UPS"},
-        {"device.type", "ups"},
-        {"driver.name", "esp-power-guardian"},
-        {"driver.version", EPG_VERSION},
-        {"ups.status", guardian_nut_status(s.condition)},
-    };
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_text[18] = {};
+    snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    size_t count = 0;
+    set_variable(vars[count++], "device.mfr", "ESP Power Guardian");
+    set_variable(vars[count++], "device.model", "ESP32-S3 UPS Gateway");
+    set_variable(vars[count++], "device.type", "ups");
+    set_variable(vars[count++], "device.serial", mac_text);
+    set_variable(vars[count++], "device.macaddr", mac_text);
+    set_variable(vars[count++], "driver.name", "esp-power-guardian");
+    set_variable(vars[count++], "driver.version", EPG_VERSION);
+    set_variable(vars[count++], "ups.firmware", EPG_VERSION);
+    set_variable(vars[count++], "ups.status", guardian_nut_status(s.condition));
     snprintf(number, sizeof(number), "%.1f", s.input_voltage);
-    vars.emplace_back("input.voltage", number);
+    set_variable(vars[count++], "input.voltage", number);
     snprintf(number, sizeof(number), "%.1f", s.output_voltage);
-    vars.emplace_back("output.voltage", number);
+    set_variable(vars[count++], "output.voltage", number);
     snprintf(number, sizeof(number), "%.1f", s.battery_voltage);
-    vars.emplace_back("battery.voltage", number);
+    set_variable(vars[count++], "battery.voltage", number);
     snprintf(number, sizeof(number), "%d", s.battery_percent);
-    vars.emplace_back("battery.charge", number);
+    set_variable(vars[count++], "battery.charge", number);
     snprintf(number, sizeof(number), "%d", s.runtime_seconds);
-    vars.emplace_back("battery.runtime", number);
+    set_variable(vars[count++], "battery.runtime", number);
     snprintf(number, sizeof(number), "%d", s.load_percent);
-    vars.emplace_back("ups.load", number);
+    set_variable(vars[count++], "ups.load", number);
     snprintf(number, sizeof(number), "%.1f", s.frequency);
-    vars.emplace_back("input.frequency", number);
-    return vars;
+    set_variable(vars[count++], "input.frequency", number);
+    return count;
 }
 
-static void send_line(int socket, const std::string &line) {
+static bool send_line(int socket, const std::string &line) {
     std::string output = line + "\n";
-    send(socket, output.data(), output.size(), 0);
+    size_t sent = 0;
+    while (sent < output.size()) {
+        int result = send(socket, output.data() + sent, output.size() - sent, 0);
+        if (result <= 0) return false;
+        sent += static_cast<size_t>(result);
+    }
+    return true;
 }
 
-static std::string quoted(const std::string &value) {
-    return "\"" + value + "\"";
+static void send_variable(int socket, const NutVariable &variable) {
+    char line[160] = {};
+    snprintf(line, sizeof(line), "VAR %s %s \"%s\"", UPS_NAME,
+             variable.name, variable.value);
+    send_line(socket, line);
 }
 
 static void process(int socket, std::string line) {
@@ -84,18 +112,20 @@ static void process(int socket, std::string line) {
     }
     if (line == std::string("LIST VAR ") + UPS_NAME) {
         send_line(socket, std::string("BEGIN LIST VAR ") + UPS_NAME);
-        for (const auto &var : variables()) {
-            send_line(socket, std::string("VAR ") + UPS_NAME + " " + var.first + " " + quoted(var.second));
-        }
+        NutVariable vars[16] = {};
+        size_t count = variables(vars, 16);
+        for (size_t i = 0; i < count; ++i) send_variable(socket, vars[i]);
         send_line(socket, std::string("END LIST VAR ") + UPS_NAME);
         return;
     }
     const std::string prefix = std::string("GET VAR ") + UPS_NAME + " ";
     if (line.rfind(prefix, 0) == 0) {
         std::string name = line.substr(prefix.size());
-        for (const auto &var : variables()) {
-            if (var.first == name) {
-                send_line(socket, std::string("VAR ") + UPS_NAME + " " + name + " " + quoted(var.second));
+        NutVariable vars[16] = {};
+        size_t count = variables(vars, 16);
+        for (size_t i = 0; i < count; ++i) {
+            if (name == vars[i].name) {
+                send_variable(socket, vars[i]);
                 return;
             }
         }
@@ -147,8 +177,12 @@ static void server_task(void *) {
     while (true) {
         int client = accept(server, nullptr, nullptr);
         if (client >= 0) {
-            xTaskCreate(client_task, "nut_client", 4096,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(client)), 4, nullptr);
+            if (xTaskCreate(client_task, "nut_client", 7168,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(client)),
+                            4, nullptr) != pdPASS) {
+                ESP_LOGE(TAG, "No hay memoria para atender un cliente NUT");
+                close(client);
+            }
         }
     }
 }

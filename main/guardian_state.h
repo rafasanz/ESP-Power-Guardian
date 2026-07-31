@@ -29,8 +29,8 @@ struct GuardianSnapshot {
 };
 
 struct GuardianOutage {
-    int64_t started_ms;
-    int64_t ended_ms;
+    int64_t started_epoch;
+    int64_t ended_epoch;
     PowerCondition condition;
 };
 

@@ -2,6 +2,7 @@
 
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -11,6 +12,10 @@
 static const char *TAG = "status_led";
 static rmt_channel_handle_t channel;
 static rmt_encoder_handle_t encoder;
+static uint32_t test_color;
+static bool test_blink;
+static int64_t test_until_ms;
+static portMUX_TYPE test_mux = portMUX_INITIALIZER_UNLOCKED;
 
 struct LedEncoder {
     rmt_encoder_t base;
@@ -90,11 +95,37 @@ static uint32_t color_for(PowerCondition condition, const LedPalette &p) {
     return 0;
 }
 
+static bool blink_for(PowerCondition condition, const LedPalette &p) {
+    switch (condition) {
+        case PowerCondition::Starting: return p.blink_starting;
+        case PowerCondition::Online: return p.blink_online;
+        case PowerCondition::OnBattery: return p.blink_on_battery;
+        case PowerCondition::LowBattery: return p.blink_low_battery;
+        case PowerCondition::Fault: return p.blink_fault;
+        case PowerCondition::Disconnected: return p.blink_disconnected;
+    }
+    return false;
+}
+
 static void led_task(void *) {
     uint64_t previous_signature = UINT64_MAX;
+    const int64_t boot_blue_until_ms = esp_timer_get_time() / 1000 + 5000;
     while (true) {
         LedPalette p = settings_led_palette();
-        uint32_t rgb = color_for(guardian_state_get().condition, p);
+        PowerCondition condition = guardian_state_get().condition;
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        portENTER_CRITICAL(&test_mux);
+        const int64_t until_ms = test_until_ms;
+        const uint32_t preview_color = test_color;
+        const bool preview_blink = test_blink;
+        portEXIT_CRITICAL(&test_mux);
+        const bool testing = now_ms < until_ms;
+        const bool showing_boot = now_ms < boot_blue_until_ms;
+        uint32_t rgb = showing_boot ? 0x0000ff :
+                       testing ? preview_color : color_for(condition, p);
+        const bool blinking = showing_boot ? false :
+                              testing ? preview_blink : blink_for(condition, p);
+        if (blinking && ((now_ms / 500) % 2 != 0)) rgb = 0;
         uint64_t signature = (static_cast<uint64_t>(rgb) << 8) | p.brightness;
         if (signature != previous_signature) {
             uint8_t scale = p.brightness;
@@ -108,8 +139,16 @@ static void led_task(void *) {
             rmt_tx_wait_all_done(channel, pdMS_TO_TICKS(100));
             previous_signature = signature;
         }
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
+}
+
+void status_led_test(uint32_t color, bool blink, uint32_t duration_ms) {
+    portENTER_CRITICAL(&test_mux);
+    test_color = color & 0xffffff;
+    test_blink = blink;
+    test_until_ms = esp_timer_get_time() / 1000 + duration_ms;
+    portEXIT_CRITICAL(&test_mux);
 }
 
 void status_led_start() {

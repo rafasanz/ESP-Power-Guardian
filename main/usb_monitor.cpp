@@ -219,7 +219,14 @@ static void client_task(void *) {
             .callback_arg = &context,
         },
     };
-    ESP_ERROR_CHECK(usb_host_client_register(&config, &context.client));
+    esp_err_t client_result = usb_host_client_register(&config, &context.client);
+    if (client_result != ESP_OK) {
+        snprintf(qx_status, sizeof(qx_status), "USB Host activo; cliente no disponible: %s",
+                 esp_err_to_name(client_result));
+        ESP_LOGE(TAG, "%s", qx_status);
+        vTaskDelete(nullptr);
+        return;
+    }
     update_disconnected();
 
     while (true) {
@@ -320,13 +327,35 @@ const char *usb_monitor_reply() {
     return last_qx_reply;
 }
 
-void usb_monitor_start() {
+static void usb_start_task(void *) {
     usb_host_config_t config = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
         .enum_filter_cb = nullptr,
     };
-    ESP_ERROR_CHECK(usb_host_install(&config));
-    xTaskCreate(daemon_task, "usb_daemon", 4096, nullptr, 5, nullptr);
-    xTaskCreate(client_task, "usb_qx", 6144, nullptr, 4, nullptr);
+    while (true) {
+        esp_err_t result = usb_host_install(&config);
+        if (result == ESP_OK) {
+            strlcpy(qx_status, "USB Host iniciado; esperando dispositivo", sizeof(qx_status));
+            ESP_LOGI(TAG, "USB Host iniciado");
+            if (xTaskCreate(daemon_task, "usb_daemon", 4096, nullptr, 5, nullptr) != pdPASS ||
+                xTaskCreate(client_task, "usb_qx", 6144, nullptr, 4, nullptr) != pdPASS) {
+                strlcpy(qx_status, "USB Host iniciado; no se pudieron crear las tareas", sizeof(qx_status));
+                ESP_LOGE(TAG, "%s", qx_status);
+            }
+            vTaskDelete(nullptr);
+            return;
+        }
+        snprintf(qx_status, sizeof(qx_status), "USB ocupado; reintentando: %s",
+                 esp_err_to_name(result));
+        ESP_LOGW(TAG, "%s", qx_status);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
+void usb_monitor_start() {
+    if (xTaskCreate(usb_start_task, "usb_start", 3072, nullptr, 3, nullptr) != pdPASS) {
+        strlcpy(qx_status, "no se pudo iniciar la tarea USB Host", sizeof(qx_status));
+        ESP_LOGE(TAG, "%s", qx_status);
+    }
 }
