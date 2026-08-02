@@ -24,6 +24,7 @@ static constexpr int64_t POLL_INTERVAL_MS = 1000;
 static constexpr int64_t QUERY_TIMEOUT_MS = 2500;
 static constexpr int64_t STALE_AFTER_MS = 4000;
 static constexpr int64_t RECOVERY_TIMEOUT_MS = 1800;
+static constexpr int64_t CLIENT_WATCHDOG_MS = 8000;
 static constexpr uint32_t MAX_CONSECUTIVE_OVERFLOWS = 3;
 static constexpr uint32_t MAX_CONSECUTIVE_FAILURES = 6;
 static constexpr uint32_t MAX_RECOVERY_RESTARTS = 3;
@@ -31,6 +32,10 @@ static constexpr uint32_t MAX_RECOVERY_RESTARTS = 3;
 static char qx_status[128] = "esperando dispositivo USB";
 static char last_qx_reply[128] = "";
 static portMUX_TYPE diagnostics_mux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE heartbeat_mux = portMUX_INITIALIZER_UNLOCKED;
+static int64_t client_heartbeat_ms;
+static bool client_started;
+static bool maintenance_mode;
 static constexpr uint32_t RECOVERY_RTC_MAGIC = 0x45504752;
 
 struct RecoveryRtcState {
@@ -73,6 +78,20 @@ struct UsbClient {
 
 static int64_t monotonic_ms() {
     return esp_timer_get_time() / 1000;
+}
+
+static void update_client_heartbeat(bool started = true) {
+    portENTER_CRITICAL(&heartbeat_mux);
+    client_heartbeat_ms = monotonic_ms();
+    client_started = started;
+    portEXIT_CRITICAL(&heartbeat_mux);
+}
+
+void usb_monitor_set_maintenance(bool enabled) {
+    portENTER_CRITICAL(&heartbeat_mux);
+    maintenance_mode = enabled;
+    client_heartbeat_ms = monotonic_ms();
+    portEXIT_CRITICAL(&heartbeat_mux);
 }
 
 static void set_status(const char *format, ...) {
@@ -302,13 +321,10 @@ static void start_endpoint_recovery(UsbClient &context, usb_transfer_status_t st
     context.next_query_ms = 0;
     context.recovery_pending = true;
     context.recovery_deadline_ms = now_ms + RECOVERY_TIMEOUT_MS;
-    if (context.device && context.interface_claimed) {
-        esp_err_t halt = usb_host_endpoint_halt(context.device, QX_INPUT_ENDPOINT);
-        esp_err_t flush = usb_host_endpoint_flush(context.device, QX_INPUT_ENDPOINT);
-        esp_err_t clear = usb_host_endpoint_clear(context.device, QX_INPUT_ENDPOINT);
-        ESP_LOGW(TAG, "Recuperación EP81: halt=%s flush=%s clear=%s",
-                 esp_err_to_name(halt), esp_err_to_name(flush), esp_err_to_name(clear));
-    }
+    // halt/flush/clear pueden bloquear según ESP-IDF. Esperamos brevemente el
+    // callback pendiente y, si no llega, hacemos un reinicio controlado. Así la
+    // monitorización nunca queda congelada dentro de esas llamadas síncronas.
+    ESP_LOGW(TAG, "Recuperación EP81 no bloqueante (estado=%d)", status);
 }
 
 static bool automatic_usb_restart(usb_transfer_status_t status) {
@@ -336,6 +352,31 @@ static bool automatic_usb_restart(usb_transfer_status_t status) {
     vTaskDelay(pdMS_TO_TICKS(750));
     esp_restart();
     return true;
+}
+
+static void client_watchdog_task(void *) {
+    while (true) {
+        int64_t heartbeat = 0;
+        bool started = false;
+        bool maintenance = false;
+        portENTER_CRITICAL(&heartbeat_mux);
+        heartbeat = client_heartbeat_ms;
+        started = client_started;
+        maintenance = maintenance_mode;
+        portEXIT_CRITICAL(&heartbeat_mux);
+        const int64_t now_ms = monotonic_ms();
+        if (!maintenance && started && heartbeat > 0 &&
+            now_ms - heartbeat >= CLIENT_WATCHDOG_MS) {
+            set_status("tarea USB bloqueada; reinicio de seguridad");
+            ESP_LOGE(TAG, "Watchdog USB: sin actividad durante %lld ms",
+                     static_cast<long long>(now_ms - heartbeat));
+            if (!automatic_usb_restart(USB_TRANSFER_STATUS_TIMED_OUT)) {
+                vTaskDelete(nullptr);
+                return;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 static void handle_failure(UsbClient &context, usb_transfer_status_t status,
@@ -522,10 +563,12 @@ static void client_task(void *) {
     startup.automatic_restarts = recovery_rtc.restart_total;
     guardian_state_update(startup);
     publish_disconnected(false);
+    update_client_heartbeat();
 
     while (true) {
         usb_host_client_handle_events(context.client, pdMS_TO_TICKS(50));
         const int64_t now_ms = monotonic_ms();
+        update_client_heartbeat();
 
         if (context.open_requested && context.device == nullptr) open_device(context, now_ms);
 
@@ -645,5 +688,9 @@ void usb_monitor_start() {
     if (xTaskCreate(usb_start_task, "usb_start", 3072, nullptr, 3, nullptr) != pdPASS) {
         set_status("no se pudo iniciar la tarea USB Host");
         ESP_LOGE(TAG, "No se pudo iniciar la tarea USB Host");
+    }
+    if (xTaskCreate(client_watchdog_task, "usb_watchdog", 3072, nullptr, 5, nullptr) != pdPASS) {
+        set_status("no se pudo iniciar el supervisor USB");
+        ESP_LOGE(TAG, "No se pudo iniciar el supervisor USB");
     }
 }

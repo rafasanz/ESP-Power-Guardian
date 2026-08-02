@@ -14,8 +14,8 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
 - Sondeo de estado `Q1` con una única transacción pendiente y cebado Cypress
   compatible mediante `QGS`, `QS`, `F` e `I` cuando el puente devuelve un eco.
 - Caducidad de datos: un estado antiguo nunca se conserva como `OL` válido.
-- Watchdog de consulta, recuperación del endpoint `0x81` y reinicio controlado
-  del bus ante bloqueos persistentes.
+- Supervisor de frescura independiente, watchdog de la tarea USB y reinicio
+  controlado ante consultas o controladores bloqueados.
 - Estado de alimentación, tensiones, frecuencia, carga, batería y autonomía.
 - Servidor NUT compatible con `aionut 4.3.4` y la integración oficial de Home
   Assistant.
@@ -25,7 +25,8 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
 - DHCP por defecto e IP fija opcional.
 - AP de recuperación: se apaga tras conectar al Wi-Fi y reaparece si la conexión
   guardada no puede recuperarse.
-- Actualizaciones OTA desde el navegador con reinicio automático.
+- Actualizaciones OTA desde el navegador con reinicio automático y modo de
+  mantenimiento para que el watchdog USB no interrumpa la escritura del firmware.
 - Historial persistente de los diez últimos cortes eléctricos.
 - Historial persistente e independiente de pérdidas, recuperaciones,
   desconexiones y reinicios de comunicación.
@@ -72,24 +73,31 @@ con el estado vigente. Home Assistant, sin embargo, sondea por defecto la
 integración NUT cada 60 segundos; por ello un corte breve puede empezar y acabar
 entre dos actualizaciones sin quedar registrado.
 
-Para recibir los cambios aproximadamente un segundo después de su detección:
+Para recibir los cambios en unos dos segundos sin generar sondeo innecesario:
 
 1. En **Ajustes → Dispositivos y servicios → NUT**, abre el menú de la entrada.
 2. En **Opciones del sistema**, desactiva **Habilitar sondeo para
    actualizaciones**.
 3. Crea una automatización que solicite la actualización de una entidad de esa
-   integración cada segundo. Sustituye `sensor.ups_status` por la entidad real
-   de estado NUT de la instalación:
+   integración cada dos segundos. Todas las entidades del mismo SAI comparten
+   el coordinador NUT, por lo que actualizar `sensor.guardian_status` renueva en
+   la misma consulta batería, tensiones, carga, frecuencia y diagnósticos:
 
 ```yaml
-alias: ESP Power Guardian - sondeo NUT rápido
+alias: SAI entrada - Actualización NUT cada 2 segundos
+description: >-
+  Actualiza cada 2 segundos la integración NUT correspondiente al ESP32-S3
+  situado en la entrada. Aunque la acción utiliza únicamente la entidad
+  sensor.guardian_status, todas las entidades de este SAI se actualizan en la
+  misma consulta porque comparten el coordinador de datos de la integración NUT.
 triggers:
   - trigger: time_pattern
-    seconds: "/1"
+    seconds: "/2"
+conditions: []
 actions:
   - action: homeassistant.update_entity
     target:
-      entity_id: sensor.ups_status
+      entity_id: sensor.guardian_status
 mode: single
 ```
 
@@ -109,11 +117,17 @@ bytes declarados. El firmware trata explícitamente esta situación:
    el eco del comando saliente, cierra esa lectura y rota consultas de cebado
    hasta que el puente entrega la trama Q1 pendiente.
 2. Exige que la respuesta completa llegue dentro de 2,5 segundos.
-3. Considera obsoletos los datos que superan cuatro segundos sin renovación.
-4. Detiene, vacía y reactiva el endpoint `0x81` tras un fallo.
-5. Si se producen tres desbordamientos consecutivos o seis fallos seguidos,
+3. Considera obsoletos los datos que superan cuatro segundos sin renovación. Un
+   supervisor independiente aplica esta caducidad aunque la tarea USB se haya
+   detenido, y NUT, web y LED incorporan además su propia barrera de frescura.
+4. La recuperación del endpoint `0x81` no ejecuta operaciones síncronas que
+   puedan bloquear la monitorización: espera brevemente el callback pendiente y
+   reinicia de forma controlada si la transferencia queda huérfana.
+5. Un watchdog separado vigila el latido de la tarea USB y reinicia el
+   controlador si no avanza durante ocho segundos.
+6. Si se producen tres desbordamientos consecutivos o seis fallos seguidos,
    reinicia de forma controlada el ESP32 y, con ello, el controlador USB.
-6. Limita a tres los reinicios consecutivos sin una lectura válida para evitar
+7. Limita a tres los reinicios consecutivos sin una lectura válida para evitar
    bucles de arranque. Una respuesta correcta devuelve el contador a cero.
 
 La secuencia de escritura y lectura sigue el orden del subcontrolador Cypress

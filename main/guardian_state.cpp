@@ -3,6 +3,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include <ctime>
 
@@ -13,6 +14,7 @@ static size_t outage_count;
 static GuardianCommunicationEvent communication_history[10];
 static size_t communication_count;
 static constexpr const char *OUTAGE_NAMESPACE = "guardian";
+static constexpr int64_t DATA_STALE_AFTER_MS = 4000;
 
 struct StoredOutages {
     uint32_t version;
@@ -34,6 +36,31 @@ static bool is_outage(PowerCondition condition) {
 static int64_t now_epoch() {
     const time_t now = time(nullptr);
     return now >= 1700000000 ? static_cast<int64_t>(now) : 0;
+}
+
+static bool snapshot_is_stale(const GuardianSnapshot &snapshot, int64_t now_ms) {
+    return snapshot.data_valid && snapshot.last_update_ms > 0 &&
+           now_ms - snapshot.last_update_ms >= DATA_STALE_AFTER_MS;
+}
+
+static void freshness_supervisor_task(void *) {
+    while (true) {
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        bool expired = false;
+        xSemaphoreTake(state_mutex, portMAX_DELAY);
+        if (snapshot_is_stale(state, now_ms)) {
+            state.data_valid = false;
+            state.condition = PowerCondition::CommunicationLost;
+            state.last_error_ms = now_ms;
+            expired = true;
+        }
+        xSemaphoreGive(state_mutex);
+        if (expired) {
+            guardian_record_communication_event(
+                CommunicationEventType::Lost, 2 /* USB_TRANSFER_STATUS_TIMED_OUT */);
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
 
 static void persist_outages() {
@@ -105,12 +132,19 @@ void guardian_state_init() {
         }
         nvs_close(nvs);
     }
+    xTaskCreate(freshness_supervisor_task, "state_freshness", 3072, nullptr, 5, nullptr);
 }
 
 GuardianSnapshot guardian_state_get() {
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     GuardianSnapshot copy = state;
     xSemaphoreGive(state_mutex);
+    // Segunda barrera: NUT, web y LED no aceptan una lectura antigua aunque la
+    // tarea USB quedase bloqueada antes de actualizar el estado compartido.
+    if (snapshot_is_stale(copy, esp_timer_get_time() / 1000)) {
+        copy.data_valid = false;
+        copy.condition = PowerCondition::CommunicationLost;
+    }
     return copy;
 }
 

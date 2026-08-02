@@ -400,9 +400,13 @@ static void delayed_restart_task(void *) {
 }
 
 static esp_err_t ota_handler(httpd_req_t *request) {
+    usb_monitor_set_maintenance(true);
     const esp_partition_t *partition = esp_ota_get_next_update_partition(nullptr);
     esp_ota_handle_t handle;
-    if (!partition || esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) return ESP_FAIL;
+    if (!partition || esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) {
+        usb_monitor_set_maintenance(false);
+        return ESP_FAIL;
+    }
     char buffer[2048];
     int remaining = request->content_len;
     while (remaining > 0) {
@@ -410,17 +414,25 @@ static esp_err_t ota_handler(httpd_req_t *request) {
         int received = httpd_req_recv(request, buffer, chunk);
         if (received <= 0 || esp_ota_write(handle, buffer, received) != ESP_OK) {
             esp_ota_abort(handle);
+            usb_monitor_set_maintenance(false);
             return ESP_FAIL;
         }
         remaining -= received;
     }
-    if (esp_ota_end(handle) != ESP_OK || esp_ota_set_boot_partition(partition) != ESP_OK) return ESP_FAIL;
+    if (esp_ota_end(handle) != ESP_OK || esp_ota_set_boot_partition(partition) != ESP_OK) {
+        usb_monitor_set_maintenance(false);
+        return ESP_FAIL;
+    }
     esp_err_t response =
         httpd_resp_sendstr(request, "Firmware instalado. Reiniciando…");
-    if (response != ESP_OK) return response;
+    if (response != ESP_OK) {
+        usb_monitor_set_maintenance(false);
+        return response;
+    }
     if (xTaskCreate(delayed_restart_task, "ota_restart", 2048, nullptr, 8, nullptr) !=
         pdPASS) {
         ESP_LOGE(TAG, "No se pudo programar el reinicio posterior a la OTA");
+        usb_monitor_set_maintenance(false);
         return ESP_FAIL;
     }
     return ESP_OK;
