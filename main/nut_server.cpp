@@ -14,6 +14,26 @@
 
 static const char *TAG = "nut_server";
 static constexpr const char *UPS_NAME = "guardian";
+static constexpr uint32_t MAX_NUT_CLIENTS = 4;
+static portMUX_TYPE clients_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t active_clients;
+
+static bool reserve_client() {
+    bool reserved = false;
+    portENTER_CRITICAL(&clients_mux);
+    if (active_clients < MAX_NUT_CLIENTS) {
+        active_clients++;
+        reserved = true;
+    }
+    portEXIT_CRITICAL(&clients_mux);
+    return reserved;
+}
+
+static void release_client() {
+    portENTER_CRITICAL(&clients_mux);
+    if (active_clients > 0) active_clients--;
+    portEXIT_CRITICAL(&clients_mux);
+}
 
 struct NutVariable {
     const char *name;
@@ -161,6 +181,7 @@ static void client_task(void *arg) {
     }
     shutdown(socket, SHUT_RDWR);
     close(socket);
+    release_client();
     vTaskDelete(nullptr);
 }
 
@@ -178,11 +199,18 @@ static void server_task(void *) {
     while (true) {
         int client = accept(server, nullptr, nullptr);
         if (client >= 0) {
+            if (!reserve_client()) {
+                ESP_LOGW(TAG, "Límite de clientes NUT alcanzado");
+                shutdown(client, SHUT_RDWR);
+                close(client);
+                continue;
+            }
             if (xTaskCreate(client_task, "nut_client", 7168,
                             reinterpret_cast<void *>(static_cast<intptr_t>(client)),
                             4, nullptr) != pdPASS) {
                 ESP_LOGE(TAG, "No hay memoria para atender un cliente NUT");
                 close(client);
+                release_client();
             }
         }
     }

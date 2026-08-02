@@ -24,7 +24,8 @@ static constexpr int64_t POLL_INTERVAL_MS = 1000;
 static constexpr int64_t QUERY_TIMEOUT_MS = 2500;
 static constexpr int64_t STALE_AFTER_MS = 4000;
 static constexpr int64_t RECOVERY_TIMEOUT_MS = 1800;
-static constexpr int64_t CLIENT_WATCHDOG_MS = 8000;
+static constexpr int64_t CLIENT_WATCHDOG_MS = 30000;
+static constexpr int64_t RECOVERY_STABLE_RESET_MS = 300000;
 static constexpr uint32_t MAX_CONSECUTIVE_OVERFLOWS = 3;
 static constexpr uint32_t MAX_CONSECUTIVE_FAILURES = 6;
 static constexpr uint32_t MAX_RECOVERY_RESTARTS = 3;
@@ -36,6 +37,7 @@ static portMUX_TYPE heartbeat_mux = portMUX_INITIALIZER_UNLOCKED;
 static int64_t client_heartbeat_ms;
 static bool client_started;
 static bool maintenance_mode;
+static int64_t recovery_stable_since_ms;
 static constexpr uint32_t RECOVERY_RTC_MAGIC = 0x45504752;
 
 struct RecoveryRtcState {
@@ -234,7 +236,11 @@ static bool parse_qx_reply(const char *reply) {
     if (communication_was_lost) {
         guardian_record_communication_event(CommunicationEventType::Restored);
     }
-    recovery_rtc.restart_streak = 0;
+    if (recovery_stable_since_ms == 0) {
+        recovery_stable_since_ms = now;
+    } else if (now - recovery_stable_since_ms >= RECOVERY_STABLE_RESET_MS) {
+        recovery_rtc.restart_streak = 0;
+    }
     set_status("comunicación Qx estable");
     return true;
 }
@@ -381,6 +387,7 @@ static void client_watchdog_task(void *) {
 
 static void handle_failure(UsbClient &context, usb_transfer_status_t status,
                            int64_t now_ms, const char *reason) {
+    recovery_stable_since_ms = 0;
     GuardianSnapshot snapshot = guardian_state_get();
     const bool was_valid = snapshot.data_valid;
     snapshot.consecutive_failures++;

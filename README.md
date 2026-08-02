@@ -123,12 +123,15 @@ bytes declarados. El firmware trata explícitamente esta situación:
 4. La recuperación del endpoint `0x81` no ejecuta operaciones síncronas que
    puedan bloquear la monitorización: espera brevemente el callback pendiente y
    reinicia de forma controlada si la transferencia queda huérfana.
-5. Un watchdog separado vigila el latido de la tarea USB y reinicia el
-   controlador si no avanza durante ocho segundos.
+5. Un watchdog separado vigila el latido de la tarea USB. Los datos se marcan
+   como no fiables a los cuatro segundos, pero el reinicio completo solo se
+   utiliza si la tarea no avanza durante treinta segundos.
 6. Si se producen tres desbordamientos consecutivos o seis fallos seguidos,
    reinicia de forma controlada el ESP32 y, con ello, el controlador USB.
-7. Limita a tres los reinicios consecutivos sin una lectura válida para evitar
-   bucles de arranque. Una respuesta correcta devuelve el contador a cero.
+7. Limita a tres los reinicios consecutivos para evitar bucles de arranque. El
+   contador solo vuelve a cero después de cinco minutos de comunicación
+   continuada sin fallos; una lectura válida aislada no oculta un bloqueo
+   recurrente.
 
 La secuencia de escritura y lectura sigue el orden del subcontrolador Cypress
 de NUT: primero `SET_REPORT` y, tras completarse, lectura del endpoint `0x81`.
