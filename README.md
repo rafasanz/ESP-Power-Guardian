@@ -65,6 +65,40 @@ dispositivo, MAC, firmware y variables eléctricas. Mientras no haya un SAI
 conectado o los datos Qx estén obsoletos, `ups.status` se publica como `OFF` y
 las variables eléctricas antiguas dejan de anunciarse.
 
+### Detección rápida de cortes
+
+El ESP32 consulta el SAI cada segundo y el servidor NUT responde inmediatamente
+con el estado vigente. Home Assistant, sin embargo, sondea por defecto la
+integración NUT cada 60 segundos; por ello un corte breve puede empezar y acabar
+entre dos actualizaciones sin quedar registrado.
+
+Para recibir los cambios aproximadamente un segundo después de su detección:
+
+1. En **Ajustes → Dispositivos y servicios → NUT**, abre el menú de la entrada.
+2. En **Opciones del sistema**, desactiva **Habilitar sondeo para
+   actualizaciones**.
+3. Crea una automatización que solicite la actualización de una entidad de esa
+   integración cada segundo. Sustituye `sensor.ups_status` por la entidad real
+   de estado NUT de la instalación:
+
+```yaml
+alias: ESP Power Guardian - sondeo NUT rápido
+triggers:
+  - trigger: time_pattern
+    seconds: "/1"
+actions:
+  - action: homeassistant.update_entity
+    target:
+      entity_id: sensor.ups_status
+mode: single
+```
+
+El estado publicado es `OL` con alimentación de red, `OB DISCHRG` funcionando
+con batería y `OB LB DISCHRG` cuando además la batería está baja. Para ejecutar
+una acción solo si el corte persiste, utiliza un disparador de estado con
+`for: "00:03:00"`; la recuperación a `OL` cancela automáticamente ese
+temporizador.
+
 ## Estabilidad USB/Qx
 
 Los Salicru SPS ONE que utilizan el puente Cypress `0665:5161` pueden bloquear

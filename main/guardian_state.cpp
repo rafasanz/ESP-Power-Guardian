@@ -207,8 +207,8 @@ void guardian_clear_outage_history() {
 const char *guardian_nut_status(PowerCondition condition) {
     switch (condition) {
         case PowerCondition::Online: return "OL";
-        case PowerCondition::OnBattery: return "OB";
-        case PowerCondition::LowBattery: return "OB LB";
+        case PowerCondition::OnBattery: return "OB DISCHRG";
+        case PowerCondition::LowBattery: return "OB LB DISCHRG";
         case PowerCondition::Fault: return "ALARM";
         default: return "OFF";
     }
