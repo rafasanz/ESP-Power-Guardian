@@ -23,7 +23,11 @@ static constexpr const char *QX_PROBES[] = {"Q1\r", "QGS\r", "QS\r", "F\r", "I\r
 static constexpr int64_t POLL_INTERVAL_MS = 1000;
 static constexpr int64_t QUERY_TIMEOUT_MS = 2500;
 static constexpr int64_t STALE_AFTER_MS = 4000;
-static constexpr int64_t RECOVERY_TIMEOUT_MS = 1800;
+// El puente Cypress puede tardar varios segundos en completar una transferencia
+// pendiente. ESP-IDF solo permite cancelarla mediante halt/flush, operaciones
+// potencialmente bloqueantes. Mantenemos la red y el supervisor disponibles y
+// damos tiempo al callback antes de recurrir al reinicio completo.
+static constexpr int64_t RECOVERY_TIMEOUT_MS = 15000;
 static constexpr int64_t CLIENT_WATCHDOG_MS = 30000;
 static constexpr int64_t RECOVERY_STABLE_RESET_MS = 300000;
 static constexpr uint32_t MAX_CONSECUTIVE_OVERFLOWS = 3;

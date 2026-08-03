@@ -121,8 +121,10 @@ bytes declarados. El firmware trata explícitamente esta situación:
    supervisor independiente aplica esta caducidad aunque la tarea USB se haya
    detenido, y NUT, web y LED incorporan además su propia barrera de frescura.
 4. La recuperación del endpoint `0x81` no ejecuta operaciones síncronas que
-   puedan bloquear la monitorización: espera brevemente el callback pendiente y
-   reinicia de forma controlada si la transferencia queda huérfana.
+   puedan bloquear la monitorización. Espera hasta quince segundos el callback
+   pendiente del puente Cypress y solo reinicia de forma controlada si la
+   transferencia continúa huérfana. Durante esa espera, los datos caducan a los
+   cuatro segundos y web, NUT y LED dejan de publicar un estado antiguo.
 5. Un watchdog separado vigila el latido de la tarea USB. Los datos se marcan
    como no fiables a los cuatro segundos, pero el reinicio completo solo se
    utiliza si la tarea no avanza durante treinta segundos.
