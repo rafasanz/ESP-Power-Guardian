@@ -9,11 +9,14 @@
 
 static constexpr size_t DEVICE_NAME_SIZE = 33;
 static char device_name[DEVICE_NAME_SIZE] = {};
+static char nut_name[DEVICE_NAME_SIZE] = {};
 
-static void set_default_device_name() {
+static void set_default_names() {
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(device_name, sizeof(device_name), "ESPGuardian-%02X%02X",
+             mac[4], mac[5]);
+    snprintf(nut_name, sizeof(nut_name), "guardian-%02X%02X",
              mac[4], mac[5]);
 }
 
@@ -78,7 +81,7 @@ static NetworkSettings network = {
 
 void settings_init() {
     nvs_flash_init();
-    set_default_device_name();
+    set_default_names();
     nvs_handle_t nvs;
     if (nvs_open("guardian", NVS_READONLY, &nvs) != ESP_OK) return;
     size_t size = 0;
@@ -110,6 +113,8 @@ void settings_init() {
     }
     size = sizeof(device_name);
     nvs_get_str(nvs, "device_name", device_name, &size);
+    size = sizeof(nut_name);
+    nvs_get_str(nvs, "nut_name", nut_name, &size);
     nvs_close(nvs);
 }
 
@@ -168,8 +173,24 @@ bool settings_set_wifi_credentials(const char *ssid, const char *password) {
 }
 
 const char *settings_device_name() {
-    if (!device_name[0]) set_default_device_name();
+    if (!device_name[0]) set_default_names();
     return device_name;
+}
+
+const char *settings_nut_name() {
+    if (!nut_name[0]) set_default_names();
+    return nut_name;
+}
+
+bool settings_set_nut_name(const char *name) {
+    if (!name || !name[0] || strlen(name) >= sizeof(nut_name)) return false;
+    strlcpy(nut_name, name, sizeof(nut_name));
+    nvs_handle_t nvs;
+    if (nvs_open("guardian", NVS_READWRITE, &nvs) != ESP_OK) return false;
+    esp_err_t result = nvs_set_str(nvs, "nut_name", nut_name);
+    if (result == ESP_OK) result = nvs_commit(nvs);
+    nvs_close(nvs);
+    return result == ESP_OK;
 }
 
 bool settings_set_device_name(const char *name) {

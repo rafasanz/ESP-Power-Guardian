@@ -124,7 +124,7 @@ static esp_err_t status_handler(httpd_req_t *request) {
     const std::string escaped_reply = json_escape(qx_reply);
     char json[1536];
     snprintf(json, sizeof(json),
-             "{\"firmware\":\"%s\",\"device_name\":\"%s\",\"condition\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
+             "{\"firmware\":\"%s\",\"device_name\":\"%s\",\"nut_name\":\"%s\",\"condition\":\"%s\",\"wifi\":\"%s\",\"ip\":\"%s\","
              "\"mac\":\"%s\",\"recovery_ap\":%s,\"rssi\":%d,\"uptime_s\":%lld,\"nut_port\":3493,\"ups_status\":\"%s\","
              "\"usb_vid\":\"%04x\",\"usb_pid\":\"%04x\",\"qx_status\":\"%s\",\"qx_reply\":\"%s\","
              "\"data_valid\":%s,\"last_data_age_s\":%lld,\"monitoring_s\":%lld,"
@@ -132,7 +132,8 @@ static esp_err_t status_handler(httpd_req_t *request) {
              "\"automatic_restarts\":%lu,\"last_usb_status\":%d,\"input_voltage\":%.1f,"
              "\"output_voltage\":%.1f,\"frequency\":%.1f,\"battery_voltage\":%.1f,"
              "\"battery\":%d,\"runtime_s\":%d,\"load\":%d}",
-             EPG_VERSION, settings_device_name(), guardian_condition_name(s.condition),
+             EPG_VERSION, settings_device_name(), settings_nut_name(),
+             guardian_condition_name(s.condition),
              wifi_manager_connected() ? "conectado" : "sin conexión", wifi_manager_ip(),
              mac_text, wifi_manager_ap_active() ? "true" : "false", rssi,
              static_cast<long long>(uptime), guardian_nut_status(s.condition),
@@ -312,6 +313,7 @@ static esp_err_t network_get_handler(httpd_req_t *request) {
         if (character == '"' || character == '\\') character = '_';
     }
     std::string json = std::string("{\"device_name\":\"") + settings_device_name() +
+        "\",\"nut_name\":\"" + settings_nut_name() +
         "\",\"mode\":\"" + (network.dhcp ? "dhcp" : "static") +
         "\",\"ssid\":\"" + safe_ssid + "\",\"ip\":\"" + network.ip + "\",\"gateway\":\"" + network.gateway +
         "\",\"netmask\":\"" + network.netmask + "\",\"dns\":\"" + network.dns + "\"}";
@@ -323,9 +325,10 @@ static esp_err_t wifi_post_handler(httpd_req_t *request) {
     std::string body(request->content_len + 1, '\0');
     int received = httpd_req_recv(request, body.data(), request->content_len);
     if (received <= 0) return ESP_FAIL;
-    char device_name[33] = {}, ssid[33] = {}, password[65] = {};
+    char device_name[33] = {}, nut_name[33] = {}, ssid[33] = {}, password[65] = {};
     char mode[8] = "dhcp", ip[16] = {}, gateway[16] = {}, netmask[16] = {}, dns[16] = {};
     if (!form_value(body, "device_name", device_name, sizeof(device_name)) ||
+        !form_value(body, "nut_name", nut_name, sizeof(nut_name)) ||
         !form_value(body, "ssid", ssid, sizeof(ssid)) ||
         !form_value(body, "password", password, sizeof(password)) ||
         !form_value(body, "mode", mode, sizeof(mode)) ||
@@ -336,18 +339,19 @@ static esp_err_t wifi_post_handler(httpd_req_t *request) {
         httpd_resp_set_status(request, "400 Bad Request");
         return httpd_resp_sendstr(request, "La configuración contiene un valor no válido o demasiado largo.");
     }
-    size_t name_length = strlen(device_name);
-    if (name_length == 0 || device_name[0] == '-' || device_name[name_length - 1] == '-') {
-        httpd_resp_set_status(request, "400 Bad Request");
-        return httpd_resp_sendstr(request, "El nombre debe tener entre 1 y 32 caracteres y no puede empezar ni terminar con guion.");
-    }
-    for (size_t i = 0; i < name_length; ++i) {
-        char c = device_name[i];
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-              (c >= '0' && c <= '9') || c == '-')) {
-            httpd_resp_set_status(request, "400 Bad Request");
-            return httpd_resp_sendstr(request, "El nombre solo puede contener letras, números y guiones.");
+    auto valid_name = [](const char *name) {
+        size_t length = strlen(name);
+        if (length == 0 || length > 32 || name[0] == '-' || name[length - 1] == '-') return false;
+        for (size_t i = 0; i < length; ++i) {
+            char c = name[i];
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '-')) return false;
         }
+        return true;
+    };
+    if (!valid_name(device_name) || !valid_name(nut_name)) {
+        httpd_resp_set_status(request, "400 Bad Request");
+        return httpd_resp_sendstr(request, "Los nombres deben tener entre 1 y 32 caracteres, usar solo letras, números y guiones, y no empezar ni terminar con guion.");
     }
     char current_ssid[33] = {}, current_password[65] = {};
     settings_wifi_credentials(current_ssid, sizeof(current_ssid),
@@ -366,7 +370,7 @@ static esp_err_t wifi_post_handler(httpd_req_t *request) {
         strlcpy(network.netmask, netmask, sizeof(network.netmask));
         strlcpy(network.dns, dns, sizeof(network.dns));
     }
-    if (!settings_set_device_name(device_name) ||
+    if (!settings_set_device_name(device_name) || !settings_set_nut_name(nut_name) ||
         !settings_set_wifi_credentials(ssid, password) || !settings_set_network(network)) {
         httpd_resp_set_status(request, "500 Internal Server Error");
         return httpd_resp_sendstr(request, "No se pudo guardar la red.");

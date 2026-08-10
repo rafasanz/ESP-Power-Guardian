@@ -63,8 +63,11 @@ Añade la integración oficial **Network UPS Tools (NUT)** con estos datos:
 - Usuario: vacío.
 - Contraseña: vacía.
 
-El servidor anuncia un SAI con el nombre `guardian` y publica información del
-dispositivo, MAC, firmware y variables eléctricas. Mientras no haya un SAI
+El servidor anuncia por defecto un SAI con el nombre `guardian-XXXX`, donde
+`XXXX` son los cuatro últimos dígitos de la MAC. Este nombre puede cambiarse en
+**Ajustes** antes de añadir la integración a Home Assistant y debe ser único en
+cada instalación. El servidor publica información del dispositivo, MAC,
+firmware y variables eléctricas. Mientras no haya un SAI
 conectado o los datos Qx estén obsoletos, `ups.status` se publica como `OFF` y
 las variables eléctricas antiguas dejan de anunciarse.
 
@@ -185,9 +188,10 @@ red local de confianza.
 último error, fallos consecutivos, recuperaciones del endpoint, reinicios
 automáticos y último resultado de transferencia USB.
 
-`GET /api/status` y `GET /api/network` incluyen el nombre del dispositivo. Para
-cambiarlo, envía `device_name` junto con el resto de campos de `POST /api/wifi`;
-el nuevo nombre se conserva en NVS y se aplica después del reinicio.
+`GET /api/status` y `GET /api/network` incluyen el nombre del dispositivo y el
+nombre del SAI anunciado por NUT. Para cambiarlos, envía `device_name` y
+`nut_name` junto con el resto de campos de `POST /api/wifi`; ambos se conservan
+en NVS y se aplican después del reinicio.
 
 ## Compatibilidad de SAI
 

@@ -11,9 +11,9 @@
 #include "lwip/sockets.h"
 
 #include "guardian_state.h"
+#include "settings.h"
 
 static const char *TAG = "nut_server";
-static constexpr const char *UPS_NAME = "guardian";
 static constexpr uint32_t MAX_NUT_CLIENTS = 4;
 static portMUX_TYPE clients_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t active_clients;
@@ -96,7 +96,7 @@ static bool send_line(int socket, const std::string &line) {
 
 static void send_variable(int socket, const NutVariable &variable) {
     char line[160] = {};
-    snprintf(line, sizeof(line), "VAR %s %s \"%s\"", UPS_NAME,
+    snprintf(line, sizeof(line), "VAR %s %s \"%s\"", settings_nut_name(),
              variable.name, variable.value);
     send_line(socket, line);
 }
@@ -113,33 +113,35 @@ static void process(int socket, std::string line) {
     }
     if (line == "LIST UPS") {
         send_line(socket, "BEGIN LIST UPS");
-        send_line(socket, std::string("UPS ") + UPS_NAME + " \"ESP Power Guardian\"");
+        send_line(socket, std::string("UPS ") + settings_nut_name() + " \"" +
+                  settings_device_name() + "\"");
         send_line(socket, "END LIST UPS");
         return;
     }
-    if (line == std::string("GET UPSDESC ") + UPS_NAME) {
-        send_line(socket, std::string("UPSDESC ") + UPS_NAME + " \"ESP Power Guardian\"");
+    if (line == std::string("GET UPSDESC ") + settings_nut_name()) {
+        send_line(socket, std::string("UPSDESC ") + settings_nut_name() + " \"" +
+                  settings_device_name() + "\"");
         return;
     }
-    if (line == std::string("LIST RW ") + UPS_NAME) {
-        send_line(socket, std::string("BEGIN LIST RW ") + UPS_NAME);
-        send_line(socket, std::string("END LIST RW ") + UPS_NAME);
+    if (line == std::string("LIST RW ") + settings_nut_name()) {
+        send_line(socket, std::string("BEGIN LIST RW ") + settings_nut_name());
+        send_line(socket, std::string("END LIST RW ") + settings_nut_name());
         return;
     }
-    if (line == std::string("LIST CMD ") + UPS_NAME) {
-        send_line(socket, std::string("BEGIN LIST CMD ") + UPS_NAME);
-        send_line(socket, std::string("END LIST CMD ") + UPS_NAME);
+    if (line == std::string("LIST CMD ") + settings_nut_name()) {
+        send_line(socket, std::string("BEGIN LIST CMD ") + settings_nut_name());
+        send_line(socket, std::string("END LIST CMD ") + settings_nut_name());
         return;
     }
-    if (line == std::string("LIST VAR ") + UPS_NAME) {
-        send_line(socket, std::string("BEGIN LIST VAR ") + UPS_NAME);
+    if (line == std::string("LIST VAR ") + settings_nut_name()) {
+        send_line(socket, std::string("BEGIN LIST VAR ") + settings_nut_name());
         NutVariable vars[16] = {};
         size_t count = variables(vars, 16);
         for (size_t i = 0; i < count; ++i) send_variable(socket, vars[i]);
-        send_line(socket, std::string("END LIST VAR ") + UPS_NAME);
+        send_line(socket, std::string("END LIST VAR ") + settings_nut_name());
         return;
     }
-    const std::string prefix = std::string("GET VAR ") + UPS_NAME + " ";
+    const std::string prefix = std::string("GET VAR ") + settings_nut_name() + " ";
     if (line.rfind(prefix, 0) == 0) {
         std::string name = line.substr(prefix.size());
         NutVariable vars[16] = {};

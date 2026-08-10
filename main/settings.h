@@ -37,5 +37,7 @@ bool settings_wifi_credentials(char *ssid, size_t ssid_size, char *password, siz
 bool settings_set_wifi_credentials(const char *ssid, const char *password);
 const char *settings_device_name();
 bool settings_set_device_name(const char *name);
+const char *settings_nut_name();
+bool settings_set_nut_name(const char *name);
 NetworkSettings settings_network();
 bool settings_set_network(const NetworkSettings &network);
