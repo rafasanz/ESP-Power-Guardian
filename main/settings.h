@@ -35,5 +35,7 @@ LedPalette settings_led_palette();
 bool settings_set_led_palette(const LedPalette &palette);
 bool settings_wifi_credentials(char *ssid, size_t ssid_size, char *password, size_t password_size);
 bool settings_set_wifi_credentials(const char *ssid, const char *password);
+const char *settings_device_name();
+bool settings_set_device_name(const char *name);
 NetworkSettings settings_network();
 bool settings_set_network(const NetworkSettings &network);

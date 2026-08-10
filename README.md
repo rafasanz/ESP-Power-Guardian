@@ -33,19 +33,21 @@ los pines `5V` y `GND` cuando el puerto del SAI no entrega alimentación.
 - Servidor HTTP/JSON para consulta e integración local.
 - LED RGB con colores, brillo y parpadeo configurables por estado.
 - Apariencia configurable: modo, tema, tipografía, tamaño, espaciado y bordes.
-- Servidor mDNS accesible como `esp-power-guardian.local` cuando la red lo
-  permite.
+- Nombre de dispositivo configurable, anunciado como hostname DHCP y utilizado
+  también por el punto de acceso de recuperación.
 
 ## Primera configuración
 
 1. Alimenta el ESP32-S3.
-2. Conéctate al AP `ESP-Power-Guardian-XXXX`.
+2. Conéctate al AP `ESPGuardian-XXXX`, donde `XXXX` son los cuatro últimos
+   dígitos de la MAC.
 3. Abre `http://192.168.4.1`.
 4. En **Ajustes**, busca y selecciona la red Wi-Fi, introduce su contraseña y
    conserva **DHCP (automática)**.
 5. Guarda la configuración. El ESP32 se reiniciará y el router le asignará una
    dirección.
-6. Accede mediante esa dirección o `http://esp-power-guardian.local`.
+6. Accede mediante esa dirección. El router también mostrará el dispositivo con
+   su nombre, que puede cambiarse desde **Ajustes**.
 7. Opcionalmente, configura una IP fija. Dejar vacía la contraseña conserva la
    que ya está guardada.
 
@@ -182,6 +184,10 @@ red local de confianza.
 `GET /api/status` incluye, además de las medidas, la edad del último dato y del
 último error, fallos consecutivos, recuperaciones del endpoint, reinicios
 automáticos y último resultado de transferencia USB.
+
+`GET /api/status` y `GET /api/network` incluyen el nombre del dispositivo. Para
+cambiarlo, envía `device_name` junto con el resto de campos de `POST /api/wifi`;
+el nuevo nombre se conserva en NVS y se aplica después del reinicio.
 
 ## Compatibilidad de SAI
 

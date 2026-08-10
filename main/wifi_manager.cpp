@@ -199,6 +199,7 @@ void wifi_manager_start() {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     station_netif = esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
+    ESP_ERROR_CHECK(esp_netif_set_hostname(station_netif, settings_device_name()));
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr));
@@ -212,10 +213,8 @@ void wifi_manager_start() {
     static_ip_pending = have_credentials && !requested_network.dhcp;
     static_ip_applied = false;
 
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     char ap_name[33];
-    snprintf(ap_name, sizeof(ap_name), "ESP-Power-Guardian-%02X%02X", mac[4], mac[5]);
+    strlcpy(ap_name, settings_device_name(), sizeof(ap_name));
 
     wifi_config_t ap = {};
     strlcpy(reinterpret_cast<char *>(ap.ap.ssid), ap_name, sizeof(ap.ap.ssid));

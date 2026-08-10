@@ -1,7 +1,21 @@
 #include "settings.h"
 
+#include <cstdio>
+#include <cstring>
+
+#include "esp_mac.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+static constexpr size_t DEVICE_NAME_SIZE = 33;
+static char device_name[DEVICE_NAME_SIZE] = {};
+
+static void set_default_device_name() {
+    uint8_t mac[6] = {};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(device_name, sizeof(device_name), "ESPGuardian-%02X%02X",
+             mac[4], mac[5]);
+}
 
 static int hex_value(char value) {
     if (value >= '0' && value <= '9') return value - '0';
@@ -64,6 +78,7 @@ static NetworkSettings network = {
 
 void settings_init() {
     nvs_flash_init();
+    set_default_device_name();
     nvs_handle_t nvs;
     if (nvs_open("guardian", NVS_READONLY, &nvs) != ESP_OK) return;
     size_t size = 0;
@@ -93,6 +108,8 @@ void settings_init() {
         stored_network.magic == NETWORK_SETTINGS_MAGIC) {
         network = stored_network;
     }
+    size = sizeof(device_name);
+    nvs_get_str(nvs, "device_name", device_name, &size);
     nvs_close(nvs);
 }
 
@@ -145,6 +162,22 @@ bool settings_set_wifi_credentials(const char *ssid, const char *password) {
     if (nvs_open("guardian", NVS_READWRITE, &nvs) != ESP_OK) return false;
     esp_err_t result = nvs_set_str(nvs, "wifi_ssid", ssid);
     if (result == ESP_OK) result = nvs_set_str(nvs, "wifi_pass", password);
+    if (result == ESP_OK) result = nvs_commit(nvs);
+    nvs_close(nvs);
+    return result == ESP_OK;
+}
+
+const char *settings_device_name() {
+    if (!device_name[0]) set_default_device_name();
+    return device_name;
+}
+
+bool settings_set_device_name(const char *name) {
+    if (!name || !name[0] || strlen(name) >= sizeof(device_name)) return false;
+    strlcpy(device_name, name, sizeof(device_name));
+    nvs_handle_t nvs;
+    if (nvs_open("guardian", NVS_READWRITE, &nvs) != ESP_OK) return false;
+    esp_err_t result = nvs_set_str(nvs, "device_name", device_name);
     if (result == ESP_OK) result = nvs_commit(nvs);
     nvs_close(nvs);
     return result == ESP_OK;
